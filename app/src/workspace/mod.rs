@@ -1035,6 +1035,17 @@ pub fn init(app: &mut AppContext) {
         .with_context_predicate(id!("Workspace"))
         .with_enabled(|| ContextFlag::LaunchConfigurations.is_enabled()),
         EditableBinding::new(
+            "workspace:toggle_tabs_palette",
+            BindingDescription::new("Toggle tabs palette")
+                .with_custom_description(bindings::MAC_MENUS_CONTEXT, "Tabs Palette"),
+            WorkspaceAction::TogglePalette {
+                mode: PaletteMode::Tabs,
+                source: PaletteSource::Keybinding,
+            },
+        )
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(id!("Workspace")),
+        EditableBinding::new(
             "workspace:toggle_files_palette",
             "Toggle Files Palette",
             WorkspaceAction::TogglePalette {

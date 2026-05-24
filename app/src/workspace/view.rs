@@ -12622,6 +12622,34 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// Opens the regular command palette pre-filtered to the current window's tabs, listed by title
+    /// and MRU order. Mirrors the Ctrl-Tab tabs list but with normal Enter-to-accept semantics and a
+    /// user-bindable shortcut.
+    fn open_tabs_palette(&mut self, ctx: &mut ViewContext<Self>) {
+        let window_id = ctx.window_id();
+        let tabs = self.tab_navigation_data(window_id, ctx.as_ref());
+        let mixer = self
+            .palette
+            .as_ref(ctx)
+            .search_bar
+            .as_ref(ctx)
+            .mixer()
+            .clone();
+        let data_source_store = self.palette.as_ref(ctx).data_source_store.clone();
+
+        self.palette.update(ctx, |view, ctx| {
+            view.reset(ctx);
+        });
+        data_source_store.update(ctx, |store, ctx| {
+            store.reset_ctrl_tab_mixer(mixer, tabs, ctx);
+        });
+        self.palette.update(ctx, |view, ctx| {
+            view.set_active_query_filter(QueryFilter::Tabs, ctx);
+            view.set_initial_selection_offset(0, ctx);
+        });
+        ctx.notify();
+    }
+
     fn close_palette(
         &mut self,
         focus_active_tab: bool,
@@ -12743,6 +12771,7 @@ impl Workspace {
             PaletteMode::Files => self.open_files_palette(ctx),
             PaletteMode::Conversations => self.open_conversations_palette(ctx),
             PaletteMode::Projects => self.open_projects_palette(ctx),
+            PaletteMode::Tabs => self.open_tabs_palette(ctx),
         }
 
         ctx.focus(&self.palette);

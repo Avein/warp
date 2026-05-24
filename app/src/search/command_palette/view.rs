@@ -383,6 +383,7 @@ impl View {
                 | (PaletteMode::Conversations, QueryFilter::Conversations)
                 | (PaletteMode::WarpDrive, QueryFilter::Drive)
                 | (PaletteMode::Projects, QueryFilter::Projects)
+                | (PaletteMode::Tabs, QueryFilter::Tabs)
         )
     }
 
@@ -772,6 +773,14 @@ impl View {
                     }) => {
                         self.reset(ctx);
                         self.set_active_query_filter(QueryFilter::Projects, ctx);
+                        return;
+                    }
+                    Some(WorkspaceAction::TogglePalette {
+                        mode: PaletteMode::Tabs,
+                        source: _,
+                    }) => {
+                        self.reset(ctx);
+                        self.set_active_query_filter(QueryFilter::Tabs, ctx);
                         return;
                     }
                     Some(WorkspaceAction::TogglePalette {
