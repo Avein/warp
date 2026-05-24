@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -31,6 +31,24 @@ impl LaunchConfig {
                 .filter_map(|window| (!window.quake_mode).then_some(window.clone().into()))
                 .collect::<Vec<WindowTemplate>>(),
         }
+    }
+
+    /// Returns the working directory of the first pane in the first tab of the first window, if any.
+    /// Used by the `projects:` palette to show a project's path and resolve its current git branch.
+    pub fn primary_cwd(&self) -> Option<&Path> {
+        fn first_cwd(layout: &PaneTemplateType) -> Option<&Path> {
+            match layout {
+                PaneTemplateType::PaneTemplate { cwd, .. } => Some(cwd.as_path()),
+                PaneTemplateType::PaneBranchTemplate { panes, .. } => {
+                    panes.iter().find_map(first_cwd)
+                }
+            }
+        }
+        self.windows
+            .first()?
+            .tabs
+            .first()
+            .and_then(|tab| first_cwd(&tab.layout))
     }
 }
 

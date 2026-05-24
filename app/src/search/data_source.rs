@@ -64,6 +64,10 @@ lazy_static! {
         primary_text: "launch_configs:",
         aliases: vec![]
     };
+    static ref PROJECTS_FILTER_ATOM: FilterAtom = FilterAtom {
+        primary_text: "projects:",
+        aliases: vec![]
+    };
     static ref ENV_VARS_FILTER_ATOM: FilterAtom = FilterAtom {
         primary_text: "env_vars:",
         aliases: vec![]
@@ -179,6 +183,10 @@ pub enum QueryFilter {
     /// Filter results for launch configurations.
     LaunchConfigurations,
 
+    /// Filter results for projects (saved launch configs surfaced by the `projects:` palette,
+    /// focus-or-spawn + MRU ordering).
+    Projects,
+
     /// Filter for objects in Warp Drive
     Drive,
 
@@ -245,6 +253,7 @@ impl QueryFilter {
             QueryFilter::Tabs => "Search tabs",
             QueryFilter::Conversations => "Search conversations",
             QueryFilter::LaunchConfigurations => "Search launch configurations",
+            QueryFilter::Projects => "Search projects",
             QueryFilter::Drive => "Search objects in drive",
             QueryFilter::EnvironmentVariables => "Search environment variables",
             QueryFilter::PromptHistory => "Search prompt history",
@@ -279,6 +288,7 @@ impl QueryFilter {
             QueryFilter::Tabs => &NO_FILTER_ATOM,
             QueryFilter::Conversations => &CONVERSATIONS_FILTER_ATOM,
             QueryFilter::LaunchConfigurations => &LAUNCH_CONFIG_FILTER_ATOM,
+            QueryFilter::Projects => &PROJECTS_FILTER_ATOM,
             QueryFilter::Drive => &DRIVE_FILTER_ATOM,
             QueryFilter::EnvironmentVariables => &ENV_VARS_FILTER_ATOM,
             QueryFilter::PromptHistory => &AI_PROMPTS_FILTER_ATOM,
@@ -311,6 +321,7 @@ impl QueryFilter {
             QueryFilter::Tabs => "tabs",
             QueryFilter::Conversations => "conversations",
             QueryFilter::LaunchConfigurations => "launch configurations",
+            QueryFilter::Projects => "projects",
             QueryFilter::Drive => "Warp Drive",
             QueryFilter::EnvironmentVariables => "environment variables",
             QueryFilter::PromptHistory => "prompt history",
@@ -348,6 +359,7 @@ impl QueryFilter {
             QueryFilter::Tabs => Some("bundled/svg/terminal-input.svg"),
             QueryFilter::Conversations => Some("bundled/svg/conversation.svg"),
             QueryFilter::LaunchConfigurations => Some("bundled/svg/navigation.svg"),
+            QueryFilter::Projects => Some("bundled/svg/navigation.svg"),
             QueryFilter::Drive => Some("bundled/svg/warp-drive.svg"),
             QueryFilter::EnvironmentVariables => Some("bundled/svg/env-var-collection.svg"),
             QueryFilter::AgentModeWorkflows | QueryFilter::PromptHistory => {

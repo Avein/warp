@@ -49,6 +49,8 @@ impl crate::search::item::SearchItem for SearchItem {
             appearance,
             highlight_state,
             self.match_result.matched_indices.clone(),
+            false,
+            None,
         )
     }
 

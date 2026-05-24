@@ -59,6 +59,16 @@ pub enum CommandPaletteItemAction {
         /// See [`OpenLaunchConfigArg::open_in_active_window`].
         open_in_active_window: bool,
     },
+    /// Focus the project's window if it is already open (singleton), otherwise spawn the launch
+    /// config in a new window. Fired by Enter in the `projects:` palette.
+    FocusOrSpawnProject {
+        config: Arc<LaunchConfig>,
+    },
+    /// Close the project's window if it is currently open, otherwise spawn it. Fired by the
+    /// secondary action (Cmd/Shift+Enter) in the `projects:` palette.
+    CloseProject {
+        config: Arc<LaunchConfig>,
+    },
     NewSession {
         source: Arc<NewSessionOption>,
     },
@@ -116,6 +126,10 @@ impl CommandPaletteItemAction {
             CommandPaletteItemAction::OpenLaunchConfiguration { .. } => {
                 ItemSummary::LaunchConfiguration
             }
+            // Projects manage their own MRU ordering via `ProjectSwitcher`, so they don't
+            // participate in the palette's generic "recent items" tracking.
+            CommandPaletteItemAction::FocusOrSpawnProject { .. }
+            | CommandPaletteItemAction::CloseProject { .. } => ItemSummary::NoOp,
             CommandPaletteItemAction::ViewInWarpDrive { id } => match id {
                 CloudObjectTypeAndId::Notebook(_)
                 | CloudObjectTypeAndId::Folder(_)

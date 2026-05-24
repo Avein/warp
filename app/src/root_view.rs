@@ -25,7 +25,7 @@ use warpui::elements::{
     Border, ChildAnchor, OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Stack,
 };
 use warpui::keymap::{EditableBinding, FixedBinding};
-use warpui::platform::{WindowBounds, WindowStyle};
+use warpui::platform::{TerminationMode, WindowBounds, WindowStyle};
 use warpui::presenter::ChildView;
 use warpui::rendering::OnGPUDeviceSelected;
 use warpui::windowing::WindowManager;
@@ -96,7 +96,9 @@ use crate::window_settings::WindowSettings;
 use crate::workspace::hoa_onboarding::mark_hoa_onboarding_completed;
 use crate::workspace::tab_settings::TabSettings;
 use crate::workspace::view::OnboardingTutorial;
-use crate::workspace::{PaneViewLocator, Workspace, WorkspaceAction, WorkspaceRegistry};
+use crate::workspace::{
+    PaneViewLocator, ProjectSwitcher, Workspace, WorkspaceAction, WorkspaceRegistry,
+};
 use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::update_manager::TeamUpdateManager;
 use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
@@ -215,6 +217,17 @@ pub struct OpenPath {
     pub path: PathBuf,
 }
 
+/// Argument for `root_view:focus_or_spawn_project`: focus the project's window if it is already
+/// open (singleton), otherwise spawn the launch config in a new window.
+pub struct FocusOrSpawnProjectArg {
+    pub launch_config: launch_config::LaunchConfig,
+}
+
+/// Argument for `root_view:close_project`: close the named project's window if it is open.
+pub struct CloseProjectArg {
+    pub name: String,
+}
+
 // Arguments for actions that run a command that should start a subshell.
 pub struct SubshellCommandArg {
     pub command: String,
@@ -271,6 +284,8 @@ pub fn init(app: &mut AppContext) {
         open_new_tab_insert_subshell_command_and_bootstrap_if_supported,
     );
     app.add_global_action("root_view:open_launch_config", open_launch_config);
+    app.add_global_action("root_view:focus_or_spawn_project", focus_or_spawn_project);
+    app.add_global_action("root_view:close_project", close_project);
     app.add_global_action("root_view:send_feedback", send_feedback);
     app.add_global_action(
         "root_view:toggle_quake_mode_window",
@@ -562,6 +577,62 @@ fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
         },
         ctx
     );
+}
+
+/// Focuses the project's window if it is already open (true singleton via [`ProjectSwitcher`]),
+/// otherwise spawns the launch config in a new window and records the window so subsequent
+/// selections focus it instead of spawning a duplicate.
+fn focus_or_spawn_project(arg: &FocusOrSpawnProjectArg, ctx: &mut AppContext) {
+    let name = arg.launch_config.name.clone();
+
+    // Already open: focus and mark most-recently-used.
+    if let Some(window_id) = ProjectSwitcher::as_ref(ctx).live_window(&name, ctx) {
+        ctx.windows().show_window_and_focus_app(window_id);
+        ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.touch(&name));
+        return;
+    }
+
+    // Not open: a project with no windows behaves like opening a fresh window.
+    if arg.launch_config.windows.is_empty() {
+        open_new(&(), ctx);
+        return;
+    }
+
+    // Spawn each window of the launch config, recording the active (or first) window as the one
+    // the switcher will focus next time.
+    let mut first_window = None;
+    let mut project_window = None;
+    for (idx, window_template) in arg.launch_config.windows.iter().enumerate() {
+        let (window_id, _) = open_new_with_workspace_source(
+            NewWorkspaceSource::FromTemplate {
+                window_template: window_template.clone(),
+            },
+            ctx,
+        );
+        first_window.get_or_insert(window_id);
+        let is_active = arg
+            .launch_config
+            .active_window_index
+            .map_or(idx == 0, |active| active == idx);
+        if is_active {
+            project_window = Some(window_id);
+        }
+    }
+
+    if let Some(window_id) = project_window.or(first_window) {
+        ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| {
+            switcher.record_open(&name, window_id);
+        });
+    }
+}
+
+/// Closes the named project's window if it is currently open, then forgets its window association.
+fn close_project(arg: &CloseProjectArg, ctx: &mut AppContext) {
+    if let Some(window_id) = ProjectSwitcher::as_ref(ctx).live_window(&arg.name, ctx) {
+        ctx.windows()
+            .close_window(window_id, TerminationMode::Cancellable);
+    }
+    ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.forget(&arg.name));
 }
 
 fn send_feedback(_: &(), ctx: &mut AppContext) {

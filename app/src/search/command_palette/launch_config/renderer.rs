@@ -12,14 +12,27 @@ use crate::launch_configs::launch_config::LaunchConfig;
 use crate::search::result_renderer::ItemHighlightState;
 use crate::themes::theme::Fill;
 
+/// Extra project metadata rendered by the `projects:` palette beneath a config's name: the
+/// home-relative working directory and, when the directory is a git repo, the current branch.
+pub(crate) struct ProjectRowDetails {
+    pub path: String,
+    pub branch: Option<String>,
+}
+
 impl LaunchConfig {
     /// Renders a [`LaunchConfig`] using a [`StylesProvider`]. Any character indices of the launch
-    /// config title contained within `highlighted_indices` are highlighted in bold.
-    pub(super) fn render(
+    /// config title contained within `highlighted_indices` are highlighted in bold. When `is_open`
+    /// is true (used by the `projects:` palette for projects with a live window), an extra "open"
+    /// pill is rendered alongside the window/tab description. When `project` is `Some` (the
+    /// `projects:` palette), a git-branch pill is added and the working directory is rendered on a
+    /// second line below the name.
+    pub(crate) fn render(
         &self,
         appearance: &Appearance,
         item_highlight_state: ItemHighlightState,
         highlight_indices: Vec<usize>,
+        is_open: bool,
+        project: Option<ProjectRowDetails>,
     ) -> Box<dyn Element> {
         let bg_color = background_fill(item_highlight_state, appearance);
 
@@ -34,18 +47,47 @@ impl LaunchConfig {
             .with_single_highlight(highlight, highlight_indices)
             .finish();
 
-        let mut configuration = Flex::row();
-        configuration.add_child(Shrinkable::new(1., Align::new(label).left().finish()).finish());
+        let mut top_row = Flex::row();
+        top_row.add_child(Shrinkable::new(1., Align::new(label).left().finish()).finish());
 
-        configuration.add_child(
+        if is_open {
+            top_row.add_child(
+                Container::new(Self::render_string_with_pill_styling("open", appearance)).finish(),
+            );
+        }
+
+        if let Some(branch) = project.as_ref().and_then(|p| p.branch.clone()) {
+            top_row.add_child(
+                Container::new(Self::render_string_with_pill_styling(branch, appearance)).finish(),
+            );
+        }
+
+        top_row.add_child(
             Container::new(self.render_config_description(appearance))
                 .with_margin_right(14.)
                 .finish(),
         );
 
-        ConstrainedBox::new(configuration.finish())
-            .with_height(40.)
-            .finish()
+        match project {
+            Some(ProjectRowDetails { path, .. }) => {
+                let path_text = Text::new_inline(
+                    path,
+                    appearance.ui_font_family(),
+                    appearance.monospace_font_size() - 2.,
+                )
+                .with_color(appearance.theme().hint_text_color(bg_color).into_solid())
+                .finish();
+                let column = Flex::column()
+                    .with_child(top_row.finish())
+                    .with_child(Align::new(path_text).left().finish());
+                ConstrainedBox::new(column.finish())
+                    .with_height(52.)
+                    .finish()
+            }
+            None => ConstrainedBox::new(top_row.finish())
+                .with_height(40.)
+                .finish(),
+        }
     }
 
     fn default_pill_styles(appearance: &Appearance) -> UiComponentStyles {

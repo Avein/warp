@@ -26,7 +26,7 @@ use crate::appearance::Appearance;
 use crate::drive::CloudObjectTypeAndId;
 use crate::features::FeatureFlag;
 use crate::palette::PaletteMode;
-use crate::root_view::OpenLaunchConfigArg;
+use crate::root_view::{CloseProjectArg, FocusOrSpawnProjectArg, OpenLaunchConfigArg};
 use crate::search::action::search_item::MatchedBinding;
 use crate::search::binding_source::{BindingFilterFn, BindingSource};
 use crate::search::command_palette::data_sources::DataSourceStore;
@@ -382,6 +382,7 @@ impl View {
                 | (PaletteMode::Files, QueryFilter::Files)
                 | (PaletteMode::Conversations, QueryFilter::Conversations)
                 | (PaletteMode::WarpDrive, QueryFilter::Drive)
+                | (PaletteMode::Projects, QueryFilter::Projects)
         )
     }
 
@@ -766,6 +767,14 @@ impl View {
                         return;
                     }
                     Some(WorkspaceAction::TogglePalette {
+                        mode: PaletteMode::Projects,
+                        source: _,
+                    }) => {
+                        self.reset(ctx);
+                        self.set_active_query_filter(QueryFilter::Projects, ctx);
+                        return;
+                    }
+                    Some(WorkspaceAction::TogglePalette {
                         mode: PaletteMode::Command,
                         source: _,
                     }) => {
@@ -876,6 +885,22 @@ impl View {
                         open_in_active_window,
                         launch_config: config.deref().clone(),
                         ui_location: LaunchConfigUiLocation::CommandPalette,
+                    },
+                );
+            }
+            CommandPaletteItemAction::FocusOrSpawnProject { config } => {
+                ctx.dispatch_global_action(
+                    "root_view:focus_or_spawn_project",
+                    FocusOrSpawnProjectArg {
+                        launch_config: config.deref().clone(),
+                    },
+                );
+            }
+            CommandPaletteItemAction::CloseProject { config } => {
+                ctx.dispatch_global_action(
+                    "root_view:close_project",
+                    CloseProjectArg {
+                        name: config.name.clone(),
                     },
                 );
             }

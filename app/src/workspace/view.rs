@@ -12613,6 +12613,15 @@ impl Workspace {
         });
     }
 
+    fn open_projects_palette(&mut self, ctx: &mut ViewContext<Self>) {
+        self.palette.update(ctx, |view, ctx| {
+            view.reset(ctx);
+            view.set_active_query_filter(QueryFilter::Projects, ctx);
+            view.set_initial_selection_offset(0, ctx);
+        });
+        ctx.notify();
+    }
+
     fn close_palette(
         &mut self,
         focus_active_tab: bool,
@@ -12733,6 +12742,7 @@ impl Workspace {
             PaletteMode::WarpDrive => self.open_warp_drive_palette(ctx),
             PaletteMode::Files => self.open_files_palette(ctx),
             PaletteMode::Conversations => self.open_conversations_palette(ctx),
+            PaletteMode::Projects => self.open_projects_palette(ctx),
         }
 
         ctx.focus(&self.palette);

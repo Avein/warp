@@ -13,7 +13,9 @@ use crate::search::binding_source::BindingSource;
 use crate::search::command_palette::mixer::{CommandPaletteItemAction, ItemSummary};
 use crate::search::command_palette::new_session::NewSessionDataSource;
 use crate::search::command_palette::repos::RepoDataSource;
-use crate::search::command_palette::{files, launch_config, navigation, tabs, CommandPaletteMixer};
+use crate::search::command_palette::{
+    files, launch_config, navigation, projects, tabs, CommandPaletteMixer,
+};
 use crate::search::data_source::QueryResult;
 use crate::search::files::model::FileSearchModel;
 use crate::search::mixer::AddAsyncSourceOptions;
@@ -27,6 +29,7 @@ pub struct DataSourceStore {
     sessions_data_source: ModelHandle<navigation::DataSource>,
     warp_drive_data_source: ModelHandle<warp_drive::DataSource>,
     launch_config_data_source: ModelHandle<launch_config::DataSource>,
+    projects_data_source: ModelHandle<projects::DataSource>,
     new_session_data_source: Option<ModelHandle<NewSessionDataSource>>,
     all_conversation_data_source: ModelHandle<conversations::DataSource>,
     repo_data_source: ModelHandle<RepoDataSource>,
@@ -49,6 +52,8 @@ impl DataSourceStore {
 
         let launch_config_data_source = ctx.add_model(launch_config::DataSource::new);
 
+        let projects_data_source = ctx.add_model(|_| projects::DataSource::new());
+
         let new_session_data_source = (FeatureFlag::ShellSelector.is_enabled()
             && cfg!(feature = "local_tty"))
         .then_some(ctx.add_model(|ctx| NewSessionDataSource::new(binding_source, ctx)));
@@ -63,6 +68,7 @@ impl DataSourceStore {
             sessions_data_source,
             warp_drive_data_source,
             launch_config_data_source,
+            projects_data_source,
             new_session_data_source,
             all_conversation_data_source,
             repo_data_source,
@@ -84,6 +90,15 @@ impl DataSourceStore {
                 mixer.add_sync_source(
                     self.launch_config_data_source.clone(),
                     HashSet::from([QueryFilter::LaunchConfigurations]),
+                );
+            }
+
+            // The `projects:` palette reuses saved launch configs but adds focus-or-spawn +
+            // MRU ordering; gate it on the same flag that exposes launch configurations.
+            if ContextFlag::LaunchConfigurations.is_enabled() {
+                mixer.add_sync_source(
+                    self.projects_data_source.clone(),
+                    HashSet::from([QueryFilter::Projects]),
                 );
             }
 
