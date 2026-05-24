@@ -956,6 +956,7 @@ pub struct Workspace {
     changelog_model: ModelHandle<ChangelogModel>,
     palette: ViewHandle<CommandPalette>,
     ctrl_tab_palette: ViewHandle<CommandPalette>,
+    alt_tab_palette: ViewHandle<CommandPalette>,
     mouse_states: WorkspaceMouseStates,
     settings_pane: ViewHandle<SettingsView>,
     import_modal: ViewHandle<ImportModal>,
@@ -2620,6 +2621,12 @@ impl Workspace {
             me.handle_palette_event(event, ctx);
         });
 
+        let alt_tab_palette =
+            ctx.add_typed_action_view(|ctx| CommandPalette::new(NavigationMode::AltTab, ctx));
+        ctx.subscribe_to_view(&alt_tab_palette, |me, _, event, ctx| {
+            me.handle_palette_event(event, ctx);
+        });
+
         let auth_manager = AuthManager::handle(ctx);
         ctx.subscribe_to_model(&auth_manager, Self::handle_auth_manager_event);
 
@@ -3095,6 +3102,7 @@ impl Workspace {
             welcome_tips_view,
             palette,
             ctrl_tab_palette,
+            alt_tab_palette,
             mouse_states: Default::default(),
             previous_theme: None,
             settings_pane,
@@ -10204,6 +10212,70 @@ impl Workspace {
         ctx.notify();
     }
 
+    pub fn cycle_prev_project(&mut self, ctx: &mut ViewContext<Self>) {
+        self.cycle_project(SessionCycleDirection::Previous, ctx);
+    }
+
+    pub fn cycle_next_project(&mut self, ctx: &mut ViewContext<Self>) {
+        self.cycle_project(SessionCycleDirection::Next, ctx);
+    }
+
+    /// Alt+Tab project switcher: opens (or advances) a quick-switch palette listing projects in
+    /// MRU order with the active project dropped. Mirrors the Ctrl+Tab session switcher but on the
+    /// Alt modifier — the palette's [`NavigationMode::AltTab`] accepts the selected item when Alt
+    /// is released, focusing-or-spawning that project.
+    fn cycle_project(&mut self, direction: SessionCycleDirection, ctx: &mut ViewContext<Self>) {
+        let palette_was_open = self.current_workspace_state.is_alt_tab_palette_open;
+        if !palette_was_open {
+            self.open_alt_tab_palette(matches!(direction, SessionCycleDirection::Previous), ctx);
+        } else {
+            // The projects source is synchronous, so the initial offset handles the first-open
+            // selection; only advance once the palette is already showing.
+            self.alt_tab_palette
+                .update(ctx, |palette, ctx| match direction {
+                    SessionCycleDirection::Next => palette.select_next_item(ctx),
+                    SessionCycleDirection::Previous => palette.select_prev_item(ctx),
+                });
+        }
+        ctx.notify();
+    }
+
+    fn open_alt_tab_palette(&mut self, shift_pressed_initially: bool, ctx: &mut ViewContext<Self>) {
+        // The active project is dropped from the list, so the first item is already the project to
+        // switch *to*. Select it directly (offset 0) when cycling forward; for a reverse cycle,
+        // start from the end of the list.
+        let offset = if shift_pressed_initially { -1 } else { 0 };
+
+        self.close_all_overlays(ctx);
+        self.current_workspace_state.is_alt_tab_palette_open = true;
+
+        self.alt_tab_palette.update(ctx, |view, ctx| {
+            view.reset(ctx);
+        });
+
+        let mixer = self
+            .alt_tab_palette
+            .as_ref(ctx)
+            .search_bar
+            .as_ref(ctx)
+            .mixer()
+            .clone();
+        let data_source_store = self.alt_tab_palette.as_ref(ctx).data_source_store.clone();
+        data_source_store.update(ctx, |store, ctx| {
+            store.reset_projects_mixer(mixer, ctx);
+        });
+
+        self.alt_tab_palette.update(ctx, |view, ctx| {
+            // Offset must be set BEFORE the filter: the projects query is synchronous, so results
+            // arrive during set_active_query_filter and the offset must already be stored for
+            // on_mixer_results_changed to pick it up.
+            view.set_initial_selection_offset(offset, ctx);
+            view.set_active_query_filter(QueryFilter::Projects, ctx);
+        });
+
+        ctx.notify();
+    }
+
     pub fn cycle_prev_session(&mut self, ctx: &mut ViewContext<Self>) {
         self.cycle_session(SessionCycleDirection::Previous, ctx);
     }
@@ -12658,6 +12730,7 @@ impl Workspace {
     ) {
         self.current_workspace_state.is_palette_open = false;
         self.current_workspace_state.is_ctrl_tab_palette_open = false;
+        self.current_workspace_state.is_alt_tab_palette_open = false;
         self.tab_bar_pinned_by_popup = false;
         self.sync_window_button_visibility(ctx);
         if focus_active_tab
@@ -21092,6 +21165,8 @@ impl TypedActionView for Workspace {
             ActivateLastTab => self.activate_last_tab(ctx),
             CyclePrevSession => self.cycle_prev_session(ctx),
             CycleNextSession => self.cycle_next_session(ctx),
+            CyclePrevProject => self.cycle_prev_project(ctx),
+            CycleNextProject => self.cycle_next_project(ctx),
             MoveActiveTabLeft => self.move_tab(self.active_tab_index, TabMovement::Left, ctx),
             MoveActiveTabRight => self.move_tab(self.active_tab_index, TabMovement::Right, ctx),
             MoveTabLeft(index) => self.move_tab(*index, TabMovement::Left, ctx),
@@ -23936,6 +24011,10 @@ impl View for Workspace {
 
         if self.current_workspace_state.is_ctrl_tab_palette_open {
             stack.add_child(ChildView::new(&self.ctrl_tab_palette).finish());
+        }
+
+        if self.current_workspace_state.is_alt_tab_palette_open {
+            stack.add_child(ChildView::new(&self.alt_tab_palette).finish());
         }
 
         if self.current_workspace_state.is_require_login_modal_open {

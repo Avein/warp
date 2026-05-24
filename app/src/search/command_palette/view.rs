@@ -112,6 +112,9 @@ pub enum NavigationMode {
 
     // Palette was entered via ctrl-tab for quick session switching.
     CtrlTab,
+
+    // Palette was entered via alt-tab for quick project switching.
+    AltTab,
 }
 
 /// A view that renders the command palette and allows users to optionally apply a [`QueryFilter`]
@@ -154,8 +157,14 @@ impl TypedActionView for View {
             }
             Action::Close => self.close(ctx, None),
             Action::CtrlPressed(pressed) => {
-                if !*pressed && matches!(self.navigation_mode, NavigationMode::CtrlTab) {
-                    // Accept the selected item and reset the navigation mode on release of Ctrl key.
+                if !*pressed
+                    && matches!(
+                        self.navigation_mode,
+                        NavigationMode::CtrlTab | NavigationMode::AltTab
+                    )
+                {
+                    // Accept the selected item on release of the held modifier (Ctrl for the
+                    // ctrl-tab session switcher, Alt for the alt-tab project switcher).
                     self.accept_selected_item(ctx);
                 }
             }
@@ -209,11 +218,29 @@ impl warpui::View for View {
             .top_center()
             .finish(),
         )
-        .on_modifier_state_changed(|ctx, _, key_code, state| {
-            if matches!(key_code, KeyCode::ControlLeft | KeyCode::ControlRight) {
-                ctx.dispatch_typed_action(Action::CtrlPressed(matches!(state, KeyState::Pressed)));
+        .on_modifier_state_changed({
+            // The modifier we watch for "release to accept" depends on how the palette was
+            // entered: Ctrl for the ctrl-tab session switcher, Alt for the alt-tab project
+            // switcher. In Normal mode no modifier drives acceptance.
+            let navigation_mode = self.navigation_mode.clone();
+            move |ctx, _, key_code, state| {
+                let watched = match navigation_mode {
+                    NavigationMode::CtrlTab => {
+                        matches!(key_code, KeyCode::ControlLeft | KeyCode::ControlRight)
+                    }
+                    NavigationMode::AltTab => {
+                        matches!(key_code, KeyCode::AltLeft | KeyCode::AltRight)
+                    }
+                    NavigationMode::Normal => false,
+                };
+                if watched {
+                    ctx.dispatch_typed_action(Action::CtrlPressed(matches!(
+                        state,
+                        KeyState::Pressed
+                    )));
+                }
+                DispatchEventResult::StopPropagation
             }
-            DispatchEventResult::StopPropagation
         })
         .finish()
     }

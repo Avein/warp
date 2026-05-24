@@ -1045,6 +1045,30 @@ pub fn init(app: &mut AppContext) {
         )
         .with_group(bindings::BindingGroup::Navigation.as_str())
         .with_context_predicate(id!("Workspace")),
+        // Alt+Tab project switcher: hold Alt and tap Tab to cycle a palette of projects (MRU
+        // order, active project dropped); release Alt to focus-or-spawn the selected project.
+        // Default keys are rebindable, but the held-modifier release detection is hardwired to
+        // Alt, so a useful rebinding must keep Alt as the modifier.
+        EditableBinding::new(
+            "workspace:cycle_next_project",
+            BindingDescription::new("Cycle to next project")
+                .with_custom_description(bindings::MAC_MENUS_CONTEXT, "Next Project"),
+            WorkspaceAction::CycleNextProject,
+        )
+        .with_key_binding("alt-tab")
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(id!("Workspace"))
+        .with_enabled(|| ContextFlag::LaunchConfigurations.is_enabled()),
+        EditableBinding::new(
+            "workspace:cycle_prev_project",
+            BindingDescription::new("Cycle to previous project")
+                .with_custom_description(bindings::MAC_MENUS_CONTEXT, "Previous Project"),
+            WorkspaceAction::CyclePrevProject,
+        )
+        .with_key_binding("alt-shift-tab")
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(id!("Workspace"))
+        .with_enabled(|| ContextFlag::LaunchConfigurations.is_enabled()),
         EditableBinding::new(
             "workspace:toggle_files_palette",
             "Toggle Files Palette",

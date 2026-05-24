@@ -195,6 +195,23 @@ impl DataSourceStore {
         }
     }
 
+    /// Resets the [`CommandPaletteMixer`] to the projects-only source for the Alt+Tab project
+    /// switcher, which lists saved launch configs MRU-ordered (with the active project dropped).
+    pub fn reset_projects_mixer(
+        &mut self,
+        mixer: ModelHandle<CommandPaletteMixer>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        mixer.update(ctx, |mixer, ctx| {
+            mixer.reset(ctx);
+            mixer.add_sync_source(
+                self.projects_data_source.clone(),
+                HashSet::from([QueryFilter::Projects]),
+            );
+            ctx.notify();
+        });
+    }
+
     /// Restores the [`CommandPaletteMixer`] to the sessions-only source for Ctrl+Tab,
     /// undoing any previous `reset_ctrl_tab_mixer` call.
     pub fn restore_ctrl_tab_session_mixer(

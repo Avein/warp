@@ -88,6 +88,7 @@ impl WelcomeTipsViewState {
 pub struct WorkspaceState {
     pub is_palette_open: bool,
     pub is_ctrl_tab_palette_open: bool,
+    pub is_alt_tab_palette_open: bool,
     pub is_theme_chooser_open: bool,
     pub is_theme_creator_modal_open: bool,
     pub is_theme_deletion_modal_open: bool,
@@ -176,11 +177,13 @@ impl WorkspaceState {
         self.is_any_non_palette_modal_open(app)
             || self.is_palette_open
             || self.is_ctrl_tab_palette_open
+            || self.is_alt_tab_palette_open
     }
 
     pub fn close_all_modals(&mut self) {
         self.is_palette_open = false;
         self.is_ctrl_tab_palette_open = false;
+        self.is_alt_tab_palette_open = false;
         self.is_theme_creator_modal_open = false;
         self.is_theme_deletion_modal_open = false;
         self.is_changelog_modal_open = false;
