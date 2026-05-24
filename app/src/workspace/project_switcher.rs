@@ -51,6 +51,17 @@ impl ProjectSwitcher {
     pub fn mru_rank(&self, name: &str) -> Option<usize> {
         self.mru.iter().position(|n| n == name)
     }
+
+    /// Returns the project whose window is currently focused, if any. The `projects:` palette drops
+    /// this entry from its unfiltered list so the top item is the project you'd switch *to* (the
+    /// previously-used one), rather than the project you are already in (alt-tab style).
+    pub fn active_project(&self, app: &AppContext) -> Option<String> {
+        let active = app.windows().active_window()?;
+        self.windows
+            .iter()
+            .find(|(_, &window_id)| window_id == active)
+            .map(|(name, _)| name.clone())
+    }
 }
 
 impl Entity for ProjectSwitcher {

@@ -45,8 +45,14 @@ impl SyncDataSource for DataSource {
         let configs = WarpConfig::as_ref(app).launch_configs();
 
         let items: Vec<SearchItem> = if term.is_empty() {
-            // Unfiltered: most-recently-used projects first, then the rest alphabetically.
-            let mut ordered: Vec<_> = configs.iter().collect();
+            // Unfiltered: most-recently-used projects first, then the rest alphabetically. The
+            // currently-focused project is dropped so the top item is the one to switch *to* (the
+            // previously-used project), not the one you are already in.
+            let active = switcher.active_project(app);
+            let mut ordered: Vec<_> = configs
+                .iter()
+                .filter(|config| active.as_deref() != Some(config.name.as_str()))
+                .collect();
             ordered.sort_by(|a, b| {
                 match (switcher.mru_rank(&a.name), switcher.mru_rank(&b.name)) {
                     (Some(x), Some(y)) => x.cmp(&y),
