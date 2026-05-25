@@ -33,6 +33,51 @@ impl LaunchConfig {
         }
     }
 
+    /// Rewrites every pane's working directory to `cwd`, recursing into split branches. Used to
+    /// re-root a "default" template at an arbitrary directory for an ad-hoc `newds` project.
+    pub fn rewrite_cwds(&mut self, cwd: &Path) {
+        fn rewrite(layout: &mut PaneTemplateType, cwd: &Path) {
+            match layout {
+                PaneTemplateType::PaneTemplate { cwd: pane_cwd, .. } => {
+                    *pane_cwd = cwd.to_path_buf();
+                }
+                PaneTemplateType::PaneBranchTemplate { panes, .. } => {
+                    for pane in panes {
+                        rewrite(pane, cwd);
+                    }
+                }
+            }
+        }
+        for window in &mut self.windows {
+            for tab in &mut window.tabs {
+                rewrite(&mut tab.layout, cwd);
+            }
+        }
+    }
+
+    /// Builds a minimal single-window, single-tab, single-pane config opening a plain shell at
+    /// `cwd`. Used as the `newds` fallback when no "default" template config exists.
+    pub fn single_pane(name: String, cwd: PathBuf) -> Self {
+        Self {
+            name,
+            active_window_index: Some(0),
+            windows: vec![WindowTemplate {
+                active_tab_index: Some(0),
+                tabs: vec![TabTemplate {
+                    title: None,
+                    layout: PaneTemplateType::PaneTemplate {
+                        cwd,
+                        commands: Vec::new(),
+                        is_focused: Some(true),
+                        pane_mode: PaneMode::Terminal,
+                        shell: None,
+                    },
+                    color: None,
+                }],
+            }],
+        }
+    }
+
     /// Returns the working directory of the first pane in the first tab of the first window, if any.
     /// Used by the `projects:` palette to show a project's path and resolve its current git branch.
     pub fn primary_cwd(&self) -> Option<&Path> {

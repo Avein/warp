@@ -64,6 +64,7 @@ use crate::experiments::{BlockOnboarding, Experiment};
 use crate::features::FeatureFlag;
 use crate::interval_timer::IntervalTimer;
 use crate::launch_configs::launch_config;
+use crate::launch_configs::launch_config::LaunchConfig;
 use crate::linear::LinearIssueWork;
 use crate::notebooks::manager::NotebookSource;
 use crate::pane_group::{NewTerminalOptions, PanesLayout};
@@ -89,6 +90,7 @@ use crate::terminal::view::{cell_size_and_padding, TerminalAction};
 use crate::themes::onboarding_theme_picker_themes;
 use crate::themes::theme::{AnsiColorIdentifier, Blend, Fill, ThemeKind, WarpThemeConfig};
 use crate::uri::OpenMCPSettingsArgs;
+use crate::user_config::WarpConfig;
 use crate::util::bindings::{self, is_binding_pty_compliant};
 use crate::util::traffic_lights::{traffic_light_data, TrafficLightData, TrafficLightMouseStates};
 use crate::view_components::DismissibleToast;
@@ -285,6 +287,7 @@ pub fn init(app: &mut AppContext) {
     );
     app.add_global_action("root_view:open_launch_config", open_launch_config);
     app.add_global_action("root_view:focus_or_spawn_project", focus_or_spawn_project);
+    app.add_global_action("root_view:open_default_session", open_default_session);
     app.add_global_action("root_view:close_project", close_project);
     app.add_global_action("root_view:send_feedback", send_feedback);
     app.add_global_action(
@@ -624,6 +627,39 @@ fn focus_or_spawn_project(arg: &FocusOrSpawnProjectArg, ctx: &mut AppContext) {
             switcher.record_open(&name, window_id);
         });
     }
+}
+
+/// Opens an ad-hoc project at `arg.path` (the `newds` command): re-roots the launch config named
+/// "default" to the given directory, names it after the directory's basename, and spawns it
+/// through [`focus_or_spawn_project`] so it joins the projects palette and Alt+Tab switcher. Falls
+/// back to a plain single shell at the path when no "default" config exists.
+///
+/// Routing through [`focus_or_spawn_project`] also gives ad-hoc projects singleton behavior keyed
+/// by basename: running `newds` again for an already-open directory focuses it instead of
+/// spawning a duplicate.
+fn open_default_session(arg: &OpenPath, ctx: &mut AppContext) {
+    let path = arg.path.clone();
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+
+    let default_template = WarpConfig::as_ref(ctx)
+        .launch_configs()
+        .iter()
+        .find(|config| config.name == "default")
+        .cloned();
+
+    let mut launch_config = match default_template {
+        Some(mut template) => {
+            template.rewrite_cwds(&path);
+            template
+        }
+        None => LaunchConfig::single_pane(name.clone(), path),
+    };
+    launch_config.name = name;
+
+    focus_or_spawn_project(&FocusOrSpawnProjectArg { launch_config }, ctx);
 }
 
 /// Closes the named project's window if it is currently open, then forgets its window association.

@@ -822,6 +822,7 @@ fn parse_auto_handoff_trigger(url: &Url) -> AutoCloudHandoffTrigger {
 enum Action {
     NewTab,
     NewWindow,
+    NewDefaultSession,
     Docker,
     OpenRepo,
     CloudAgentSetup,
@@ -837,6 +838,7 @@ impl Action {
         match url.path() {
             "/new_tab" => Ok(Self::NewTab),
             "/new_window" => Ok(Self::NewWindow),
+            "/new_default_session" => Ok(Self::NewDefaultSession),
             "/docker/open_subshell" => Ok(Self::Docker),
             "/open-repo" => Ok(Self::OpenRepo),
             "/cloud_agent_setup" => Ok(Self::CloudAgentSetup),
@@ -876,6 +878,14 @@ impl Action {
                     return;
                 };
                 open_file(window_id, path, ctx);
+            }
+            Self::NewDefaultSession => {
+                let Some(path) = parse_tab_path(url) else {
+                    log::warn!("Could not parse path to open a default session");
+                    return;
+                };
+                let arg = OpenPath { path };
+                ctx.dispatch_global_action("root_view:open_default_session", &arg);
             }
             Action::Docker => {
                 if let Err(err) = open_docker_container(url, ctx) {
@@ -1089,7 +1099,7 @@ impl Action {
                 title: "New tab created".to_owned(),
                 description: "Go to Warp to see your new tab.".to_owned(),
             }),
-            Self::NewWindow => W::Nothing,
+            Self::NewWindow | Self::NewDefaultSession => W::Nothing,
         }
     }
 }
