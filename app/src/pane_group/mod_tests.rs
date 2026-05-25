@@ -1965,7 +1965,7 @@ fn test_initial_widths_are_computed_correctly() {
             () => {
                 PaneTemplate {
                     is_focused: None,
-                    cwd: "".into(),
+                    cwd: Some("".into()),
                     commands: vec![],
                     pane_mode: PaneMode::Terminal,
                     shell: None,
@@ -2540,14 +2540,14 @@ fn test_pane_focus_does_not_have_an_infinite_event_loop() {
                 panes: vec![
                     PaneTemplateType::PaneTemplate {
                         is_focused: Some(true),
-                        cwd: "/".into(),
+                        cwd: Some("/".into()),
                         commands: vec![],
                         pane_mode: PaneMode::Terminal,
                         shell: None,
                     },
                     PaneTemplateType::PaneTemplate {
                         is_focused: None,
-                        cwd: "/".into(),
+                        cwd: Some("/".into()),
                         commands: vec![],
                         pane_mode: PaneMode::Terminal,
                         shell: None,
@@ -2666,14 +2666,14 @@ fn test_focused_pane_is_synchronized_with_application_focus() {
             panes: vec![
                 PaneTemplateType::PaneTemplate {
                     is_focused: Some(true),
-                    cwd: "/".into(),
+                    cwd: Some("/".into()),
                     commands: vec![],
                     pane_mode: PaneMode::Terminal,
                     shell: None,
                 },
                 PaneTemplateType::PaneTemplate {
                     is_focused: None,
-                    cwd: "/".into(),
+                    cwd: Some("/".into()),
                     commands: vec![],
                     pane_mode: PaneMode::Terminal,
                     shell: None,

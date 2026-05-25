@@ -184,7 +184,7 @@ fn test_render_tab_config_substitutes_values() {
         ..
     } = pane_template
     {
-        assert_eq!(cwd, std::path::PathBuf::from("/Users/me/repo"));
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/Users/me/repo")));
         // Commands should have shell-quoted values.
         assert_eq!(
             commands[0].exec,
@@ -288,7 +288,7 @@ description = "New worktree branch name"
             ..
         } = &panes[0]
         {
-            assert_eq!(*cwd, std::path::PathBuf::from("/Users/me/repo"));
+            assert_eq!(*cwd, Some(std::path::PathBuf::from("/Users/me/repo")));
             assert_eq!(commands.len(), 2);
             assert_eq!(
                 commands[0].exec,
@@ -329,7 +329,7 @@ fn test_render_tab_config_cwd_is_not_quoted() {
         pane_template
     {
         // cwd should be unquoted (raw path).
-        assert_eq!(cwd, std::path::PathBuf::from("/Users/me/my project"));
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/Users/me/my project")));
     } else {
         panic!("Expected PaneTemplate variant");
     }
@@ -709,7 +709,7 @@ description = "Branch"
     assert_eq!(title.as_deref(), Some("main"));
 
     if let PaneTemplateType::PaneTemplate { cwd, commands, .. } = template {
-        assert_eq!(cwd, std::path::PathBuf::from("/Users/me/code"));
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/Users/me/code")));
         assert_eq!(commands[0].exec, "git checkout main");
     } else {
         panic!("Expected PaneTemplate");

@@ -32,6 +32,7 @@ fn single_tab_snapshot(root: PaneNodeSnapshot) -> AppState {
             left_panel_width: None,
             right_panel_width: None,
             agent_management_filters: None,
+            project_identity: None,
         }],
         active_window_index: Some(0),
         block_lists: Default::default(),
@@ -56,6 +57,7 @@ fn multi_tab_snapshot(active_tab_index: usize, tabs: Vec<TabSnapshot>) -> AppSta
             left_panel_width: None,
             right_panel_width: None,
             agent_management_filters: None,
+            project_identity: None,
         }],
         active_window_index: Some(0),
         block_lists: Default::default(),
@@ -109,7 +111,7 @@ fn test_config_from_snapshot_flattens_single_pane() {
         template.windows[0].tabs[0].layout,
         PaneTemplateType::PaneTemplate {
             is_focused: Some(true),
-            cwd: PathBuf::from("/some/dir"),
+            cwd: Some(PathBuf::from("/some/dir")),
             commands: vec![],
             pane_mode: PaneMode::Terminal,
             shell: None,
@@ -182,14 +184,14 @@ fn test_config_from_snapshot_filters_panes() {
             panes: vec![
                 PaneTemplateType::PaneTemplate {
                     is_focused: Some(true),
-                    cwd: PathBuf::from("/path/to/dir"),
+                    cwd: Some(PathBuf::from("/path/to/dir")),
                     commands: vec![],
                     pane_mode: PaneMode::Terminal,
                     shell: None,
                 },
                 PaneTemplateType::PaneTemplate {
                     is_focused: Some(false),
-                    cwd: PathBuf::from("/some/dir"),
+                    cwd: Some(PathBuf::from("/some/dir")),
                     commands: vec![],
                     pane_mode: PaneMode::Terminal,
                     shell: None,
@@ -386,4 +388,63 @@ fn test_config_with_active_tab_being_filtered() {
 
     let template = LaunchConfig::from_snapshot("Test".into(), &state);
     assert_eq!(template.windows[0].active_tab_index, None)
+}
+
+/// Regression: a split (branch) layout must deserialize as `PaneBranchTemplate`, not collapse into
+/// a single empty `PaneTemplate`. With every `PaneTemplate` field optional, the untagged enum will
+/// silently match a branch as a leaf unless `PaneBranchTemplate` is tried first.
+#[test]
+fn test_deserialize_split_layout_is_branch_not_leaf() {
+    let yaml = r#"
+name: dotfiles
+windows:
+  - tabs:
+      - title: dotfiles
+        layout:
+          split_direction: horizontal
+          panes:
+            - cwd: /Users/me/dotfiles
+              commands:
+                - exec: git status
+            - cwd: /Users/me/dotfiles
+              commands:
+                - exec: lazygit
+"#;
+    let config: LaunchConfig = serde_yaml::from_str(yaml).expect("config should parse");
+    let layout = &config.windows[0].tabs[0].layout;
+    match layout {
+        PaneTemplateType::PaneBranchTemplate { panes, .. } => {
+            assert_eq!(panes.len(), 2, "both panes must survive parsing");
+        }
+        PaneTemplateType::PaneTemplate { .. } => {
+            panic!("split layout was wrongly parsed as a single leaf pane");
+        }
+    }
+    assert!(
+        !config.is_template(),
+        "config with cwds is a project, not a template"
+    );
+}
+
+/// A path-less config (no pane carries a `cwd`) is recognized as a template.
+#[test]
+fn test_deserialize_pathless_config_is_template() {
+    let yaml = r#"
+name: default
+windows:
+  - tabs:
+      - layout:
+          split_direction: horizontal
+          panes:
+            - commands:
+                - exec: git status
+            - commands:
+                - exec: lazygit
+"#;
+    let config: LaunchConfig = serde_yaml::from_str(yaml).expect("config should parse");
+    assert!(config.is_template(), "config with no cwds is a template");
+    match &config.windows[0].tabs[0].layout {
+        PaneTemplateType::PaneBranchTemplate { panes, .. } => assert_eq!(panes.len(), 2),
+        PaneTemplateType::PaneTemplate { .. } => panic!("expected a branch layout"),
+    }
 }

@@ -229,7 +229,7 @@ pub fn render_tab_config(
         Err(err) => {
             log::warn!("Failed to resolve pane tree for '{}': {err}", config.name);
             PaneTemplateType::PaneTemplate {
-                cwd: PathBuf::new(),
+                cwd: None,
                 commands: Vec::new(),
                 is_focused: Some(true),
                 pane_mode: PaneMode::Terminal,
@@ -368,14 +368,10 @@ fn resolve_pane_node(
             TabConfigPaneType::Cloud => PaneMode::Cloud,
         };
 
-        let cwd = node
-            .directory
-            .as_deref()
-            .map(|c| {
-                let rendered = handlebars::render_template(c, unquoted);
-                PathBuf::from(shellexpand::tilde(&rendered).into_owned())
-            })
-            .unwrap_or_default();
+        let cwd = node.directory.as_deref().map(|c| {
+            let rendered = handlebars::render_template(c, unquoted);
+            PathBuf::from(shellexpand::tilde(&rendered).into_owned())
+        });
 
         let commands: Vec<CommandTemplate> = node
             .commands

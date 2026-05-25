@@ -143,7 +143,10 @@ use super::util::{
     PaneViewLocator, TabMovement, TerminalSessionFallbackBehavior, WelcomeTipsViewState,
     WorkspaceMouseStates, WorkspaceState,
 };
-use super::{util, ActiveSession, TabBarDropTargetData, TabBarLocation, WorkspaceRegistry};
+use super::{
+    util, ActiveSession, ProjectIdentity, ProjectOrigin, ProjectSwitcher, TabBarDropTargetData,
+    TabBarLocation, WorkspaceRegistry,
+};
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::{AIConversation, AIConversationId};
@@ -3230,6 +3233,29 @@ impl Workspace {
             registry.register(window_id, weak_handle);
         });
 
+        // Claim the very first *unstamped* window of the session as the "root project" so it
+        // appears in the projects palette and Alt+Tab immediately, without a saved config. Restored
+        // windows are already stamped above from their persisted cwd, so this only fires for a fresh
+        // empty start; the short-circuit keeps `claim_root` unconsumed until a genuinely unstamped
+        // window is seen. Its path is read live from the active session (shown as `~` at home).
+        let already_stamped = ProjectSwitcher::as_ref(ctx).is_project_window(window_id);
+        if !already_stamped
+            && ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.claim_root())
+        {
+            ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| {
+                switcher.stamp(
+                    window_id,
+                    ProjectIdentity {
+                        name: "~".to_string(),
+                        path: None,
+                        // The startup root project — its own origin so the palette can icon it
+                        // distinctly from `newds`/default sessions.
+                        origin: ProjectOrigin::Root,
+                    },
+                );
+            });
+        }
+
         ws
     }
 
@@ -3581,6 +3607,26 @@ impl Workspace {
         }
     }
 
+    /// Opens a launch config window into the workspace, *replacing* the workspace's pre-existing
+    /// tabs with the launch config's tabs. Used when adopting a plain (`cmd+n`) window for a
+    /// project: the throwaway default tab is closed so only the project's tabs remain. Falls back
+    /// to plain append behavior if the launch config contributes no tabs (so the window is never
+    /// left empty).
+    pub fn open_launch_config_window_replacing(
+        &mut self,
+        window: WindowTemplate,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let original_tab_count = self.tabs.len();
+        self.open_launch_config_window(window, ctx);
+        // Only drop the originals if the config actually added tabs, so we never empty the window.
+        if self.tabs.len() > original_tab_count {
+            for _ in 0..original_tab_count {
+                self.remove_tab_without_undo(0, ctx);
+            }
+        }
+    }
+
     fn configure_new_workspace(
         &mut self,
         workspace_setting: NewWorkspaceSource,
@@ -3602,6 +3648,50 @@ impl Workspace {
             } => {
                 let active_tab_index = window_snapshot.active_tab_index;
                 let restored_left_panel_open = window_snapshot.left_panel_open;
+
+                // Project stamps live only in memory, so a restored window would otherwise come
+                // back as a plain window and vanish from the projects palette / Alt+Tab. Restore
+                // its identity from the persisted snapshot so it remains a project across restarts.
+                //
+                // Naming policy by origin: a `Config` (saved launch config) or `Template`
+                // (template-at-path) keeps its persisted name even if the tab has since been `cd`d
+                // elsewhere; a `Default`/`newds`/root session follows its current cwd, so its name
+                // is re-derived from the persisted active-tab directory. Sessions saved before
+                // identity was persisted have no stored identity and fall back to the cwd basename
+                // (as `Default`) so they still appear as projects.
+                let restored_cwd = window_snapshot
+                    .tabs
+                    .get(active_tab_index)
+                    .or_else(|| window_snapshot.tabs.first())
+                    .and_then(|tab| snapshot_first_cwd(&tab.root));
+                let cwd_basename = |cwd: &std::path::Path| {
+                    cwd.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| cwd.to_string_lossy().into_owned())
+                };
+                let restored_identity = match window_snapshot.project_identity.clone() {
+                    Some(identity) => match identity.origin {
+                        ProjectOrigin::Default => restored_cwd.clone().map(|cwd| ProjectIdentity {
+                            name: cwd_basename(&cwd),
+                            path: Some(cwd),
+                            origin: ProjectOrigin::Default,
+                        }),
+                        ProjectOrigin::Config | ProjectOrigin::Template | ProjectOrigin::Root => {
+                            Some(identity)
+                        }
+                    },
+                    None => restored_cwd.clone().map(|cwd| ProjectIdentity {
+                        name: cwd_basename(&cwd),
+                        path: Some(cwd),
+                        origin: ProjectOrigin::Default,
+                    }),
+                };
+                if let Some(identity) = restored_identity {
+                    let window_id = ctx.window_id();
+                    ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| {
+                        switcher.stamp(window_id, identity);
+                    });
+                }
 
                 window_snapshot
                     .tabs
@@ -10126,6 +10216,10 @@ impl Workspace {
                 .read(app, |view, _| view.get_filters()),
         );
 
+        // Persist the project identity (name + origin) of a project window so a restart can restore
+        // it without re-deriving the name from the (possibly since-changed) tab cwd.
+        let project_identity = ProjectSwitcher::as_ref(app).identity(window_id).cloned();
+
         WindowSnapshot {
             tabs,
             active_tab_index,
@@ -10141,6 +10235,7 @@ impl Workspace {
             left_panel_width,
             right_panel_width,
             agent_management_filters,
+            project_identity,
         }
     }
 
@@ -10241,9 +10336,9 @@ impl Workspace {
     }
 
     fn open_alt_tab_palette(&mut self, shift_pressed_initially: bool, ctx: &mut ViewContext<Self>) {
-        // The active project is dropped from the list, so the first item is already the project to
-        // switch *to*. Select it directly (offset 0) when cycling forward; for a reverse cycle,
-        // start from the end of the list.
+        // The active project is dropped from the list, so the first item (offset 0) is already the
+        // project to switch *to* (the most-recently-used other one), giving a clean X↔Y toggle on a
+        // single Alt+Tab. A reverse cycle starts from the end of the list.
         let offset = if shift_pressed_initially { -1 } else { 0 };
 
         self.close_all_overlays(ctx);
@@ -12686,6 +12781,12 @@ impl Workspace {
     }
 
     fn open_projects_palette(&mut self, ctx: &mut ViewContext<Self>) {
+        // The projects data source is shared with the Alt+Tab switcher, which switches it to the
+        // flat AltTab surface; restore the grouped palette surface before showing the palette.
+        let data_source_store = self.palette.as_ref(ctx).data_source_store.clone();
+        data_source_store.update(ctx, |store, ctx| {
+            store.set_projects_palette_surface(ctx);
+        });
         self.palette.update(ctx, |view, ctx| {
             view.reset(ctx);
             view.set_active_query_filter(QueryFilter::Projects, ctx);
@@ -25379,6 +25480,21 @@ impl Workspace {
 
 fn should_reserve_traffic_light_space_in_tab_bar(side: TrafficLightSide) -> bool {
     side == TrafficLightSide::Right
+}
+
+/// Finds the first terminal pane's working directory in a saved pane tree, recursing into splits.
+/// Used to re-derive a restored window's project identity from its persisted session.
+fn snapshot_first_cwd(node: &PaneNodeSnapshot) -> Option<std::path::PathBuf> {
+    match node {
+        PaneNodeSnapshot::Leaf(leaf) => match &leaf.contents {
+            LeafContents::Terminal(terminal) => terminal.cwd.clone().map(std::path::PathBuf::from),
+            _ => None,
+        },
+        PaneNodeSnapshot::Branch(branch) => branch
+            .children
+            .iter()
+            .find_map(|(_, child)| snapshot_first_cwd(child)),
+    }
 }
 
 /// Returns every tab-bar-equivalent rect laid out in `window_id` (horizontal

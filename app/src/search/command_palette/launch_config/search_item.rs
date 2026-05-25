@@ -51,6 +51,7 @@ impl crate::search::item::SearchItem for SearchItem {
             self.match_result.matched_indices.clone(),
             false,
             None,
+            true,
         )
     }
 

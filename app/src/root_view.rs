@@ -99,7 +99,8 @@ use crate::workspace::hoa_onboarding::mark_hoa_onboarding_completed;
 use crate::workspace::tab_settings::TabSettings;
 use crate::workspace::view::OnboardingTutorial;
 use crate::workspace::{
-    PaneViewLocator, ProjectSwitcher, Workspace, WorkspaceAction, WorkspaceRegistry,
+    ActiveSession, PaneViewLocator, ProjectIdentity, ProjectOrigin, ProjectSwitcher, Workspace,
+    WorkspaceAction, WorkspaceRegistry,
 };
 use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::update_manager::TeamUpdateManager;
@@ -223,11 +224,27 @@ pub struct OpenPath {
 /// open (singleton), otherwise spawn the launch config in a new window.
 pub struct FocusOrSpawnProjectArg {
     pub launch_config: launch_config::LaunchConfig,
+    /// Where the project came from — stamped on the window and persisted so its name is restored
+    /// correctly across restarts. The palette derives this from the config (`Config` vs path-less
+    /// `Template`); `newds` passes `Default`.
+    pub origin: ProjectOrigin,
 }
 
 /// Argument for `root_view:close_project`: close the named project's window if it is open.
 pub struct CloseProjectArg {
     pub name: String,
+}
+
+/// Argument for `root_view:focus_project_window`: focus an already-open window by id and mark it
+/// most-recently-used. Fired by Enter on an open row in the `projects:` palette / Alt+Tab.
+pub struct FocusWindowArg {
+    pub window_id: WindowId,
+}
+
+/// Argument for `root_view:close_project_window`: close an already-open window by id. Fired by the
+/// secondary action on an open row in the `projects:` palette.
+pub struct CloseWindowArg {
+    pub window_id: WindowId,
 }
 
 // Arguments for actions that run a command that should start a subshell.
@@ -289,6 +306,8 @@ pub fn init(app: &mut AppContext) {
     app.add_global_action("root_view:focus_or_spawn_project", focus_or_spawn_project);
     app.add_global_action("root_view:open_default_session", open_default_session);
     app.add_global_action("root_view:close_project", close_project);
+    app.add_global_action("root_view:focus_project_window", focus_project_window);
+    app.add_global_action("root_view:close_project_window", close_project_window);
     app.add_global_action("root_view:send_feedback", send_feedback);
     app.add_global_action(
         "root_view:toggle_quake_mode_window",
@@ -582,30 +601,81 @@ fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
     );
 }
 
-/// Focuses the project's window if it is already open (true singleton via [`ProjectSwitcher`]),
-/// otherwise spawns the launch config in a new window and records the window so subsequent
-/// selections focus it instead of spawning a duplicate.
+/// Focuses the project's window if it is already open (singleton), otherwise opens it.
+///
+/// A path-less *template* is first re-rooted at the active window's working directory and renamed
+/// after that directory's basename, so it becomes a concrete project keyed by path.
+///
+/// Opening then follows the "reuse-if-plain" rule: a single-window config opened while a plain
+/// (unstamped) window is focused *adopts* that window — appending its tabs and stamping its
+/// identity — instead of spawning a new one; a project window (or no active window) gets a fresh
+/// window. Either way the resulting window is stamped so subsequent selections focus it.
 fn focus_or_spawn_project(arg: &FocusOrSpawnProjectArg, ctx: &mut AppContext) {
-    let name = arg.launch_config.name.clone();
+    let active_window = ctx.windows().active_window();
+
+    // Resolve a template (no baked cwd) to a concrete project at the active window's cwd.
+    let mut launch_config = arg.launch_config.clone();
+    if launch_config.is_template() {
+        let path = active_window
+            .and_then(|id| {
+                ActiveSession::as_ref(ctx)
+                    .path_if_local(id)
+                    .map(Path::to_path_buf)
+            })
+            .unwrap_or_else(home_dir);
+        launch_config.rewrite_cwds(&path);
+        launch_config.name = directory_basename(&path);
+    }
+    let name = launch_config.name.clone();
+    let identity_path = launch_config.primary_cwd().map(Path::to_path_buf);
+    let origin = arg.origin;
 
     // Already open: focus and mark most-recently-used.
-    if let Some(window_id) = ProjectSwitcher::as_ref(ctx).live_window(&name, ctx) {
+    if let Some(window_id) = ProjectSwitcher::as_ref(ctx).live_window_for_name(&name, ctx) {
         ctx.windows().show_window_and_focus_app(window_id);
-        ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.touch(&name));
+        ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.touch(window_id));
         return;
     }
 
-    // Not open: a project with no windows behaves like opening a fresh window.
-    if arg.launch_config.windows.is_empty() {
+    // A config with no windows behaves like opening a fresh plain window.
+    if launch_config.windows.is_empty() {
         open_new(&(), ctx);
         return;
     }
 
-    // Spawn each window of the launch config, recording the active (or first) window as the one
-    // the switcher will focus next time.
+    // Reuse-if-plain: adopt the focused plain window for a single-window config.
+    let active_is_plain = active_window
+        .map(|id| !ProjectSwitcher::as_ref(ctx).is_project_window(id))
+        .unwrap_or(false);
+    if launch_config.windows.len() == 1 && active_is_plain {
+        if let Some((window_id, workspace)) = active_window.and_then(|id| {
+            WorkspaceRegistry::as_ref(ctx)
+                .get(id, ctx)
+                .map(|workspace| (id, workspace))
+        }) {
+            let window_template = launch_config.windows[0].clone();
+            workspace.update(ctx, |workspace, ctx| {
+                workspace.open_launch_config_window_replacing(window_template, ctx);
+            });
+            ctx.windows().show_window_and_focus_app(window_id);
+            ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| {
+                switcher.stamp(
+                    window_id,
+                    ProjectIdentity {
+                        name,
+                        path: identity_path,
+                        origin,
+                    },
+                );
+            });
+            return;
+        }
+    }
+
+    // Spawn each window of the launch config, stamping the active (or first) window as the project.
     let mut first_window = None;
     let mut project_window = None;
-    for (idx, window_template) in arg.launch_config.windows.iter().enumerate() {
+    for (idx, window_template) in launch_config.windows.iter().enumerate() {
         let (window_id, _) = open_new_with_workspace_source(
             NewWorkspaceSource::FromTemplate {
                 window_template: window_template.clone(),
@@ -613,8 +683,7 @@ fn focus_or_spawn_project(arg: &FocusOrSpawnProjectArg, ctx: &mut AppContext) {
             ctx,
         );
         first_window.get_or_insert(window_id);
-        let is_active = arg
-            .launch_config
+        let is_active = launch_config
             .active_window_index
             .map_or(idx == 0, |active| active == idx);
         if is_active {
@@ -624,9 +693,28 @@ fn focus_or_spawn_project(arg: &FocusOrSpawnProjectArg, ctx: &mut AppContext) {
 
     if let Some(window_id) = project_window.or(first_window) {
         ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| {
-            switcher.record_open(&name, window_id);
+            switcher.stamp(
+                window_id,
+                ProjectIdentity {
+                    name,
+                    path: identity_path,
+                    origin,
+                },
+            );
         });
     }
+}
+
+/// Returns the user's home directory, falling back to the filesystem root if it can't be resolved.
+fn home_dir() -> PathBuf {
+    PathBuf::from(shellexpand::tilde("~").into_owned())
+}
+
+/// The basename of `path` (its final component), used to name ad-hoc / template-opened projects.
+fn directory_basename(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
 /// Opens an ad-hoc project at `arg.path` (the `newds` command): re-roots the launch config named
@@ -639,10 +727,7 @@ fn focus_or_spawn_project(arg: &FocusOrSpawnProjectArg, ctx: &mut AppContext) {
 /// spawning a duplicate.
 fn open_default_session(arg: &OpenPath, ctx: &mut AppContext) {
     let path = arg.path.clone();
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    let name = directory_basename(&path);
 
     let default_template = WarpConfig::as_ref(ctx)
         .launch_configs()
@@ -659,16 +744,44 @@ fn open_default_session(arg: &OpenPath, ctx: &mut AppContext) {
     };
     launch_config.name = name;
 
-    focus_or_spawn_project(&FocusOrSpawnProjectArg { launch_config }, ctx);
+    // `newds` is an ad-hoc default session named after its directory; it follows the cwd, so its
+    // name may be re-derived on restart (`Default` origin).
+    focus_or_spawn_project(
+        &FocusOrSpawnProjectArg {
+            launch_config,
+            origin: ProjectOrigin::Default,
+        },
+        ctx,
+    );
 }
 
-/// Closes the named project's window if it is currently open, then forgets its window association.
+/// Closes the named project's window if it is currently open. Window cleanup in the switcher is
+/// handled lazily by liveness checks, so no explicit forget is needed.
 fn close_project(arg: &CloseProjectArg, ctx: &mut AppContext) {
-    if let Some(window_id) = ProjectSwitcher::as_ref(ctx).live_window(&arg.name, ctx) {
+    if let Some(window_id) = ProjectSwitcher::as_ref(ctx).live_window_for_name(&arg.name, ctx) {
         ctx.windows()
             .close_window(window_id, TerminationMode::Cancellable);
+        ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.forget(window_id));
     }
-    ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.forget(&arg.name));
+}
+
+/// Focuses an already-open window by id and marks it most-recently-used (if it is a project
+/// window). Fired by Enter on an open row in the `projects:` palette / Alt+Tab switcher.
+fn focus_project_window(arg: &FocusWindowArg, ctx: &mut AppContext) {
+    let window_id = arg.window_id;
+    if WorkspaceRegistry::as_ref(ctx).get(window_id, ctx).is_some() {
+        ctx.windows().show_window_and_focus_app(window_id);
+        ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.touch(window_id));
+    }
+}
+
+/// Closes an already-open window by id and forgets any project association. Fired by the secondary
+/// action on an open row in the `projects:` palette.
+fn close_project_window(arg: &CloseWindowArg, ctx: &mut AppContext) {
+    let window_id = arg.window_id;
+    ctx.windows()
+        .close_window(window_id, TerminationMode::Cancellable);
+    ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.forget(window_id));
 }
 
 fn send_feedback(_: &(), ctx: &mut AppContext) {

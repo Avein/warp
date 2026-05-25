@@ -78,7 +78,7 @@ pub fn is_feedback_skill_available(ctx: &AppContext) -> bool {
 }
 
 pub use one_time_modal_model::OneTimeModalModel;
-pub use project_switcher::ProjectSwitcher;
+pub use project_switcher::{ProjectIdentity, ProjectOrigin, ProjectSwitcher};
 pub use registry::WorkspaceRegistry;
 pub use toast_stack::ToastStack;
 

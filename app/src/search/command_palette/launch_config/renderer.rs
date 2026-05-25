@@ -33,6 +33,7 @@ impl LaunchConfig {
         highlight_indices: Vec<usize>,
         is_open: bool,
         project: Option<ProjectRowDetails>,
+        show_description: bool,
     ) -> Box<dyn Element> {
         let bg_color = background_fill(item_highlight_state, appearance);
 
@@ -62,11 +63,13 @@ impl LaunchConfig {
             );
         }
 
-        top_row.add_child(
-            Container::new(self.render_config_description(appearance))
-                .with_margin_right(14.)
-                .finish(),
-        );
+        if show_description {
+            top_row.add_child(
+                Container::new(self.render_config_description(appearance))
+                    .with_margin_right(14.)
+                    .finish(),
+            );
+        }
 
         match project {
             Some(ProjectRowDetails { path, .. }) => {

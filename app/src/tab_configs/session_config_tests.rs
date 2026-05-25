@@ -237,7 +237,7 @@ fn render_terminal_produces_correct_pane_template() {
         ..
     } = pane_template
     {
-        assert_eq!(cwd, std::path::PathBuf::from("/home/user/project"));
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/home/user/project")));
         assert!(commands.is_empty());
     } else {
         panic!("Expected PaneTemplate variant");

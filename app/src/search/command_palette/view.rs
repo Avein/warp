@@ -26,7 +26,9 @@ use crate::appearance::Appearance;
 use crate::drive::CloudObjectTypeAndId;
 use crate::features::FeatureFlag;
 use crate::palette::PaletteMode;
-use crate::root_view::{CloseProjectArg, FocusOrSpawnProjectArg, OpenLaunchConfigArg};
+use crate::root_view::{
+    CloseProjectArg, CloseWindowArg, FocusOrSpawnProjectArg, FocusWindowArg, OpenLaunchConfigArg,
+};
 use crate::search::action::search_item::MatchedBinding;
 use crate::search::binding_source::{BindingFilterFn, BindingSource};
 use crate::search::command_palette::data_sources::DataSourceStore;
@@ -46,7 +48,9 @@ use crate::settings::CtrlTabBehavior;
 use crate::terminal::keys_settings::KeysSettings;
 use crate::themes::theme::WarpTheme;
 use crate::view_components::DismissibleToast;
-use crate::workspace::{active_terminal_in_window, ForkedConversationDestination, WorkspaceAction};
+use crate::workspace::{
+    active_terminal_in_window, ForkedConversationDestination, ProjectOrigin, WorkspaceAction,
+};
 use crate::{send_telemetry_from_ctx, ToastStack};
 
 lazy_static! {
@@ -925,10 +929,18 @@ impl View {
                 );
             }
             CommandPaletteItemAction::FocusOrSpawnProject { config } => {
+                // A path-less config is a template opened at a path; one with baked cwds is a real
+                // project. This origin decides how the name is restored across restarts.
+                let origin = if config.is_template() {
+                    ProjectOrigin::Template
+                } else {
+                    ProjectOrigin::Config
+                };
                 ctx.dispatch_global_action(
                     "root_view:focus_or_spawn_project",
                     FocusOrSpawnProjectArg {
                         launch_config: config.deref().clone(),
+                        origin,
                     },
                 );
             }
@@ -938,6 +950,18 @@ impl View {
                     CloseProjectArg {
                         name: config.name.clone(),
                     },
+                );
+            }
+            CommandPaletteItemAction::FocusWindow { window_id } => {
+                ctx.dispatch_global_action(
+                    "root_view:focus_project_window",
+                    FocusWindowArg { window_id },
+                );
+            }
+            CommandPaletteItemAction::CloseWindow { window_id } => {
+                ctx.dispatch_global_action(
+                    "root_view:close_project_window",
+                    CloseWindowArg { window_id },
                 );
             }
             CommandPaletteItemAction::ExecuteWorkflow { id } => {

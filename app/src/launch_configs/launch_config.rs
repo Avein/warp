@@ -34,12 +34,13 @@ impl LaunchConfig {
     }
 
     /// Rewrites every pane's working directory to `cwd`, recursing into split branches. Used to
-    /// re-root a "default" template at an arbitrary directory for an ad-hoc `newds` project.
+    /// re-root a path-less template at an arbitrary directory when opening it as a project (the
+    /// `newds` command and "open template here" both rely on this).
     pub fn rewrite_cwds(&mut self, cwd: &Path) {
         fn rewrite(layout: &mut PaneTemplateType, cwd: &Path) {
             match layout {
                 PaneTemplateType::PaneTemplate { cwd: pane_cwd, .. } => {
-                    *pane_cwd = cwd.to_path_buf();
+                    *pane_cwd = Some(cwd.to_path_buf());
                 }
                 PaneTemplateType::PaneBranchTemplate { panes, .. } => {
                     for pane in panes {
@@ -66,7 +67,7 @@ impl LaunchConfig {
                 tabs: vec![TabTemplate {
                     title: None,
                     layout: PaneTemplateType::PaneTemplate {
-                        cwd,
+                        cwd: Some(cwd),
                         commands: Vec::new(),
                         is_focused: Some(true),
                         pane_mode: PaneMode::Terminal,
@@ -80,10 +81,11 @@ impl LaunchConfig {
 
     /// Returns the working directory of the first pane in the first tab of the first window, if any.
     /// Used by the `projects:` palette to show a project's path and resolve its current git branch.
+    /// Returns `None` for a path-less template (no pane carries a `cwd`).
     pub fn primary_cwd(&self) -> Option<&Path> {
         fn first_cwd(layout: &PaneTemplateType) -> Option<&Path> {
             match layout {
-                PaneTemplateType::PaneTemplate { cwd, .. } => Some(cwd.as_path()),
+                PaneTemplateType::PaneTemplate { cwd, .. } => cwd.as_deref(),
                 PaneTemplateType::PaneBranchTemplate { panes, .. } => {
                     panes.iter().find_map(first_cwd)
                 }
@@ -94,6 +96,23 @@ impl LaunchConfig {
             .tabs
             .first()
             .and_then(|tab| first_cwd(&tab.layout))
+    }
+
+    /// Whether this config is a path-less *template*: no pane in any tab/window carries a `cwd`.
+    /// A template defines layout + commands only and is opened *at* a path supplied at launch time;
+    /// a config with at least one baked-in `cwd` is a concrete *project*.
+    pub fn is_template(&self) -> bool {
+        fn has_cwd(layout: &PaneTemplateType) -> bool {
+            match layout {
+                PaneTemplateType::PaneTemplate { cwd, .. } => cwd.is_some(),
+                PaneTemplateType::PaneBranchTemplate { panes, .. } => panes.iter().any(has_cwd),
+            }
+        }
+        !self
+            .windows
+            .iter()
+            .flat_map(|window| window.tabs.iter())
+            .any(|tab| has_cwd(&tab.layout))
     }
 }
 
@@ -156,9 +175,24 @@ pub enum PaneMode {
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(untagged, rename_all = "lowercase")]
 pub enum PaneTemplateType {
+    // NOTE: `PaneBranchTemplate` must come first. With `untagged`, serde tries variants top to
+    // bottom; since every `PaneTemplate` field is optional, `PaneTemplate` would otherwise match a
+    // split node `{split_direction, panes}` and silently drop the split. `PaneBranchTemplate` has
+    // required `split_direction` + `panes`, so leaf panes fail it and correctly fall through to
+    // `PaneTemplate`.
+    PaneBranchTemplate {
+        split_direction: SplitDirection,
+        panes: Vec<PaneTemplateType>,
+    },
     PaneTemplate {
-        #[serde(deserialize_with = "deserialize_path")]
-        cwd: PathBuf,
+        /// Working directory for this pane. `None` marks a path-less *template* pane, opened at a
+        /// path supplied at launch time (see [`LaunchConfig::is_template`]).
+        #[serde(
+            deserialize_with = "deserialize_optional_path",
+            skip_serializing_if = "Option::is_none",
+            default
+        )]
+        cwd: Option<PathBuf>,
         #[serde(skip_serializing_if = "Vec::is_empty", default)]
         commands: Vec<CommandTemplate>,
         #[serde(skip_serializing_if = "is_falsey", default)]
@@ -169,10 +203,6 @@ pub enum PaneTemplateType {
         /// Sourced from the `shell` field of a tab config pane node.
         #[serde(skip_serializing_if = "Option::is_none", default)]
         shell: Option<String>,
-    },
-    PaneBranchTemplate {
-        split_direction: SplitDirection,
-        panes: Vec<PaneTemplateType>,
     },
 }
 
@@ -202,7 +232,7 @@ impl TryFrom<PaneNodeSnapshot> for PaneTemplateType {
             }
             PaneNodeSnapshot::Leaf(leaf) => match leaf.contents {
                 LeafContents::Terminal(terminal) => Ok(Self::PaneTemplate {
-                    cwd: PathBuf::from(terminal.cwd.unwrap_or_default()),
+                    cwd: terminal.cwd.map(PathBuf::from),
                     commands: Vec::new(),
                     is_focused: Some(leaf.is_focused),
                     pane_mode: PaneMode::Terminal,
@@ -231,14 +261,14 @@ impl TryFrom<PaneNodeSnapshot> for PaneTemplateType {
     }
 }
 
-/// Deserializes a string that semantically represents a path, expanding ~ as
-/// needed.
-fn deserialize_path<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
+/// Deserializes an optional string that semantically represents a path, expanding ~ as needed.
+/// A missing `cwd` key (template pane) deserializes to `None`.
+fn deserialize_optional_path<'de, D>(deserializer: D) -> Result<Option<PathBuf>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let raw_path = String::deserialize(deserializer)?;
-    Ok(PathBuf::from(shellexpand::tilde(&raw_path).into_owned()))
+    let raw_path = Option::<String>::deserialize(deserializer)?;
+    Ok(raw_path.map(|p| PathBuf::from(shellexpand::tilde(&p).into_owned())))
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -304,7 +334,7 @@ pub fn make_mock_single_window_launch_config() -> LaunchConfig {
                     title: Some("First Tab".to_string()),
                     layout: PaneTemplateType::PaneTemplate {
                         is_focused: Some(true),
-                        cwd: PathBuf::from("/some/path"),
+                        cwd: Some(PathBuf::from("/some/path")),
                         commands: vec!["echo test_command".into()],
                         pane_mode: PaneMode::Terminal,
                         shell: None,
@@ -315,7 +345,7 @@ pub fn make_mock_single_window_launch_config() -> LaunchConfig {
                     title: Some("Second Tab".to_string()),
                     layout: PaneTemplateType::PaneTemplate {
                         is_focused: Some(true),
-                        cwd: PathBuf::from("/some/path"),
+                        cwd: Some(PathBuf::from("/some/path")),
                         commands: vec!["echo test_command_on_another_tab".into()],
                         pane_mode: PaneMode::Terminal,
                         shell: None,

@@ -1,35 +1,65 @@
-use std::cmp::Ordering;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use fuzzy_match::match_indices_case_insensitive;
-use warpui::{AppContext, Entity, SingletonEntity};
+use warpui::{AppContext, Entity, SingletonEntity, WindowId};
 
 use crate::launch_configs::launch_config::LaunchConfig;
 use crate::search::command_palette::mixer::CommandPaletteItemAction;
 use crate::search::command_palette::projects::search_item::SearchItem;
+use crate::search::command_palette::separator_search_item::SeparatorSearchItem;
 use crate::search::data_source::{Query, QueryResult};
 use crate::search::mixer::{DataSourceRunErrorWrapper, SyncDataSource};
 use crate::user_config::WarpConfig;
-use crate::workspace::ProjectSwitcher;
+use crate::workspace::{ActiveSession, ProjectOrigin, ProjectSwitcher, WorkspaceRegistry};
 
-/// Datasource for the `projects:` palette.
+/// Which surface this data source is currently feeding.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    /// The `projects:` palette (⌃⌘P): three sections — open projects, open plain windows, and
+    /// available projects/templates — with section headers.
+    #[default]
+    Palette,
+    /// The Alt+Tab switcher: a flat, MRU-ordered list of open *project* windows (current included
+    /// at the front), like an OS window switcher. No plain windows, no available configs.
+    AltTab,
+}
+
+/// Datasource for the projects switcher surfaces.
 ///
-/// Reads saved launch configs together with live switcher state (open windows + MRU order) at
-/// query time, so the list always reflects which projects are currently open without needing to
-/// subscribe to events.
-pub struct DataSource;
+/// Reads saved launch configs together with live window state ([`WorkspaceRegistry`] +
+/// [`ProjectSwitcher`] stamps + MRU) at query time, so the list always reflects which windows are
+/// open without needing to subscribe to events.
+///
+/// A window is either a *project* (stamped with a [`crate::workspace::ProjectIdentity`] when opened
+/// via the palette / `newds` / root auto-registration) or a *plain* `cmd+n` window (unstamped).
+/// Saved launch configs that have no live project window are "available": a config with baked-in
+/// `cwd`s is a project, one without is a path-less template.
+#[derive(Default)]
+pub struct DataSource {
+    surface: Surface,
+}
 
 impl DataSource {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Selects which surface this source feeds (see [`Surface`]).
+    pub fn set_surface(&mut self, surface: Surface) {
+        self.surface = surface;
     }
 }
 
-impl Default for DataSource {
-    fn default() -> Self {
-        Self::new()
-    }
+/// A resolved open window row (project or plain), carrying everything needed to render and target
+/// it without re-reading app state.
+struct OpenRow {
+    name: String,
+    window_id: WindowId,
+    path: Option<String>,
+    branch: Option<String>,
+    /// Project origin for the row's icon; `None` for plain (`cmd+n`) windows.
+    origin: Option<ProjectOrigin>,
 }
 
 impl SyncDataSource for DataSource {
@@ -42,66 +72,100 @@ impl SyncDataSource for DataSource {
     ) -> Result<Vec<QueryResult<Self::Action>>, DataSourceRunErrorWrapper> {
         let term = query.text.trim().to_lowercase();
         let switcher = ProjectSwitcher::as_ref(app);
+        let registry = WorkspaceRegistry::as_ref(app);
         let configs = WarpConfig::as_ref(app).launch_configs();
+        let active_window = app.windows().active_window();
 
-        let items: Vec<SearchItem> = if term.is_empty() {
-            // Unfiltered: most-recently-used projects first, then the rest alphabetically. The
-            // currently-focused project is dropped so the top item is the one to switch *to* (the
-            // previously-used project), not the one you are already in.
-            let active = switcher.active_project(app);
-            let mut ordered: Vec<_> = configs
-                .iter()
-                .filter(|config| active.as_deref() != Some(config.name.as_str()))
-                .collect();
-            ordered.sort_by(|a, b| {
-                match (switcher.mru_rank(&a.name), switcher.mru_rank(&b.name)) {
-                    (Some(x), Some(y)) => x.cmp(&y),
-                    (Some(_), None) => Ordering::Less,
-                    (None, Some(_)) => Ordering::Greater,
-                    (None, None) => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        // Open project windows, MRU order (most recent first), each resolved to a display row.
+        let open_projects: Vec<OpenRow> = switcher
+            .project_windows_mru(app)
+            .into_iter()
+            .map(|window_id| {
+                let identity = switcher.identity(window_id);
+                let name = identity
+                    .map(|i| i.name.clone())
+                    .unwrap_or_else(|| "project".to_string());
+                // Prefer the stamped path; fall back to the window's live cwd (root project).
+                let cwd = identity
+                    .and_then(|i| i.path.clone())
+                    .or_else(|| live_cwd(window_id, app));
+                let (path, branch) = path_details(cwd.as_deref());
+                OpenRow {
+                    name,
+                    window_id,
+                    path,
+                    branch,
+                    origin: identity.map(|i| i.origin),
                 }
-            });
+            })
+            .collect();
 
-            let len = ordered.len();
-            ordered
+        // The Alt+Tab switcher lists open project windows, flat and MRU-ordered, with the *active*
+        // project dropped — so the top item (selected at offset 0) is the most-recently-used other
+        // project. A single Alt+Tab toggles to it; switching touches MRU, so the next Alt+Tab
+        // toggles back (X↔Y). Holding Option and tapping walks further down the MRU list.
+        if self.surface == Surface::AltTab {
+            let rows: Vec<OpenRow> = open_projects
+                .into_iter()
+                .filter(|row| Some(row.window_id) != active_window)
+                .collect();
+            // Higher score sorts to the top, so assign descending scores to preserve MRU order.
+            let len = rows.len();
+            let items = rows
                 .into_iter()
                 .enumerate()
-                .map(|(idx, config)| {
-                    let is_open = switcher.live_window(&config.name, app).is_some();
-                    // Higher score sorts first; assign descending scores to preserve MRU order.
-                    let sort_score = (len - idx) as f64;
-                    let (path, branch) = project_details(config);
-                    SearchItem::new(
-                        Arc::new(config.clone()),
-                        Vec::new(),
-                        sort_score,
-                        is_open,
-                        path,
-                        branch,
-                    )
-                })
-                .collect()
-        } else {
-            // Filtered: rank by fuzzy relevance so a typed query surfaces the right project.
-            configs
-                .iter()
-                .filter_map(|config| {
-                    let result = match_indices_case_insensitive(&config.name, &term)?;
-                    let is_open = switcher.live_window(&config.name, app).is_some();
-                    let (path, branch) = project_details(config);
-                    Some(SearchItem::new(
-                        Arc::new(config.clone()),
-                        result.matched_indices,
-                        result.score as f64,
-                        is_open,
-                        path,
-                        branch,
-                    ))
-                })
-                .collect()
-        };
+                .map(|(idx, row)| open_window_item(row, (len - idx) as f64))
+                .collect();
+            return Ok(items);
+        }
 
-        Ok(items.into_iter().map(QueryResult::from).collect())
+        // Open plain (cmd+n) windows: every live window that is not a stamped project, sorted by
+        // name for a stable listing.
+        let mut open_windows: Vec<OpenRow> = registry
+            .all_workspaces(app)
+            .into_iter()
+            .filter(|(window_id, _)| !switcher.is_project_window(*window_id))
+            .map(|(window_id, _)| {
+                let cwd = live_cwd(window_id, app);
+                let name = cwd
+                    .as_deref()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "window".to_string());
+                let (path, branch) = path_details(cwd.as_deref());
+                OpenRow {
+                    name,
+                    window_id,
+                    path,
+                    branch,
+                    origin: None,
+                }
+            })
+            .collect();
+        open_windows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+        // Available configs: every saved config whose project is not already open (matched by name).
+        let open_project_names: Vec<&str> = open_projects.iter().map(|r| r.name.as_str()).collect();
+        let mut available: Vec<&LaunchConfig> = configs
+            .iter()
+            .filter(|config| !open_project_names.contains(&config.name.as_str()))
+            .collect();
+        available.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+        // Build the three sections, keeping their separators in both the empty-query and typed-query
+        // cases. For a typed query each section is fuzzy-filtered and sorted by relevance; for an
+        // empty query the natural order (MRU / alphabetical) is kept. Either way the rows share
+        // score 0.0, so the mixer preserves insertion order and the headers stay in place — this is
+        // what lets you tell same-named open/available entries apart while typing.
+        let open_project_items = open_window_section(&open_projects, &term);
+        let open_window_items = open_window_section(&open_windows, &term);
+        let available_items = available_section(&available, &term);
+
+        Ok(assemble_sections(
+            open_project_items,
+            open_window_items,
+            available_items,
+        ))
     }
 }
 
@@ -109,10 +173,154 @@ impl Entity for DataSource {
     type Event = ();
 }
 
-/// Computes the home-relative path and current git branch for a project's primary working
-/// directory, for display in the palette row.
-fn project_details(config: &LaunchConfig) -> (Option<String>, Option<String>) {
-    let Some(cwd) = config.primary_cwd() else {
+/// Builds the rendered rows for an open-window section (open projects or open plain windows), in
+/// display order. With a non-empty `term` only fuzzy-matching rows are kept, sorted by match score
+/// (best first); with an empty term every row is kept in its given order. All rows get score 0.0 so
+/// the mixer preserves this order and the section separators stay put.
+fn open_window_section(rows: &[OpenRow], term: &str) -> Vec<QueryResult<CommandPaletteItemAction>> {
+    if term.is_empty() {
+        return rows
+            .iter()
+            .map(|row| open_window_item_ref(row, Vec::new()))
+            .collect();
+    }
+    let mut matched: Vec<(f64, &OpenRow, Vec<usize>)> = rows
+        .iter()
+        .filter_map(|row| {
+            let result = match_indices_case_insensitive(&row.name, term)?;
+            Some((result.score as f64, row, result.matched_indices))
+        })
+        .collect();
+    matched.sort_by(|a, b| b.0.total_cmp(&a.0));
+    matched
+        .into_iter()
+        .map(|(_, row, indices)| open_window_item_ref(row, indices))
+        .collect()
+}
+
+/// Builds the rendered rows for the "Available" section (saved projects + templates not currently
+/// open), in display order. Filtering/sorting mirrors [`open_window_section`].
+fn available_section(
+    configs: &[&LaunchConfig],
+    term: &str,
+) -> Vec<QueryResult<CommandPaletteItemAction>> {
+    let make = |config: &LaunchConfig, indices: Vec<usize>| {
+        let (path, branch) = path_details(config.primary_cwd());
+        // A path-less config is a template; one with baked cwds is a project.
+        let origin = if config.is_template() {
+            ProjectOrigin::Template
+        } else {
+            ProjectOrigin::Config
+        };
+        QueryResult::from(SearchItem::available(
+            Arc::new(config.clone()),
+            indices,
+            0.0,
+            path,
+            branch,
+            origin,
+        ))
+    };
+    if term.is_empty() {
+        return configs
+            .iter()
+            .map(|config| make(config, Vec::new()))
+            .collect();
+    }
+    let mut matched: Vec<(f64, &LaunchConfig, Vec<usize>)> = configs
+        .iter()
+        .filter_map(|config| {
+            let result = match_indices_case_insensitive(&config.name, term)?;
+            Some((result.score as f64, *config, result.matched_indices))
+        })
+        .collect();
+    matched.sort_by(|a, b| b.0.total_cmp(&a.0));
+    matched
+        .into_iter()
+        .map(|(_, config, indices)| make(config, indices))
+        .collect()
+}
+
+/// Assembles the three pre-built sections into the final result list, inserting a header above each
+/// non-empty section when more than one section is present. The palette renders insertion order
+/// bottom-to-top, so sections are pushed bottom-first (Available, Open Windows, Open Projects) and
+/// each section's items are reversed, with its header pushed last so it lands on top of its group.
+fn assemble_sections(
+    open_projects: Vec<QueryResult<CommandPaletteItemAction>>,
+    open_windows: Vec<QueryResult<CommandPaletteItemAction>>,
+    available: Vec<QueryResult<CommandPaletteItemAction>>,
+) -> Vec<QueryResult<CommandPaletteItemAction>> {
+    let has_projects = !open_projects.is_empty();
+    let has_windows = !open_windows.is_empty();
+    let has_available = !available.is_empty();
+    let show_headers = [has_projects, has_windows, has_available]
+        .iter()
+        .filter(|present| **present)
+        .count()
+        > 1;
+
+    let mut results: Vec<QueryResult<CommandPaletteItemAction>> = Vec::new();
+
+    results.extend(available.into_iter().rev());
+    if show_headers && has_available {
+        results.push(SeparatorSearchItem::new("Available".to_string()).into());
+    }
+
+    results.extend(open_windows.into_iter().rev());
+    if show_headers && has_windows {
+        results.push(SeparatorSearchItem::new("Open Windows".to_string()).into());
+    }
+
+    results.extend(open_projects.into_iter().rev());
+    if show_headers && has_projects {
+        results.push(SeparatorSearchItem::new("Open Projects".to_string()).into());
+    }
+
+    results
+}
+
+/// Builds a palette row (with an explicit score, used by the flat Alt+Tab list) that focuses
+/// (Enter) / closes (secondary) an open window.
+fn open_window_item(row: OpenRow, score: f64) -> QueryResult<CommandPaletteItemAction> {
+    QueryResult::from(SearchItem::open_window(
+        row.name,
+        row.window_id,
+        Vec::new(),
+        score,
+        row.path,
+        row.branch,
+        row.origin,
+    ))
+}
+
+/// Builds a palette row for an open window in a grouped section (score 0.0 so insertion order is
+/// preserved), optionally highlighting `matched_indices` from a typed query.
+fn open_window_item_ref(
+    row: &OpenRow,
+    matched_indices: Vec<usize>,
+) -> QueryResult<CommandPaletteItemAction> {
+    QueryResult::from(SearchItem::open_window(
+        row.name.clone(),
+        row.window_id,
+        matched_indices,
+        0.0,
+        row.path.clone(),
+        row.branch.clone(),
+        row.origin,
+    ))
+}
+
+/// The live working directory of a window's active session, if local.
+fn live_cwd(window_id: WindowId, app: &AppContext) -> Option<PathBuf> {
+    ActiveSession::as_ref(app)
+        .path_if_local(window_id)
+        .map(Path::to_path_buf)
+}
+
+/// Computes the home-relative path and current git branch for a working directory, for the palette
+/// detail line.
+fn path_details(cwd: Option<&Path>) -> (Option<String>, Option<String>) {
+    let Some(cwd) = cwd else {
         return (None, None);
     };
     let path = Some(warp_core::paths::home_relative_path(cwd));

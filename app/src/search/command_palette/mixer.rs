@@ -69,6 +69,17 @@ pub enum CommandPaletteItemAction {
     CloseProject {
         config: Arc<LaunchConfig>,
     },
+    /// Focus an already-open window by id. Fired by Enter on an "Open Projects" or "Open Windows"
+    /// row in the `projects:` palette (and by the Alt+Tab switcher), where the target is a concrete
+    /// live window rather than a launch config.
+    FocusWindow {
+        window_id: WindowId,
+    },
+    /// Close an already-open window by id. Fired by the secondary action (Cmd/Shift+Enter) on an
+    /// open row in the `projects:` palette.
+    CloseWindow {
+        window_id: WindowId,
+    },
     NewSession {
         source: Arc<NewSessionOption>,
     },
@@ -129,7 +140,9 @@ impl CommandPaletteItemAction {
             // Projects manage their own MRU ordering via `ProjectSwitcher`, so they don't
             // participate in the palette's generic "recent items" tracking.
             CommandPaletteItemAction::FocusOrSpawnProject { .. }
-            | CommandPaletteItemAction::CloseProject { .. } => ItemSummary::NoOp,
+            | CommandPaletteItemAction::CloseProject { .. }
+            | CommandPaletteItemAction::FocusWindow { .. }
+            | CommandPaletteItemAction::CloseWindow { .. } => ItemSummary::NoOp,
             CommandPaletteItemAction::ViewInWarpDrive { id } => match id {
                 CloudObjectTypeAndId::Notebook(_)
                 | CloudObjectTypeAndId::Folder(_)

@@ -21,7 +21,7 @@ use crate::tab::SelectedTabColor;
 use crate::terminal::ShellLaunchData;
 use crate::themes::theme::AnsiColorIdentifier;
 use crate::workspace::view::left_panel::ToolPanelView;
-use crate::workspace::WorkspaceRegistry;
+use crate::workspace::{ProjectIdentity, WorkspaceRegistry};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppState {
@@ -56,6 +56,9 @@ pub struct WindowSnapshot {
     pub left_panel_width: Option<f32>,
     pub right_panel_width: Option<f32>,
     pub agent_management_filters: Option<PersistedAgentManagementFilters>,
+    /// Identity of the project this window represents, if it is a project window. Persisted so
+    /// restored windows keep their project name/origin across restarts (see [`ProjectIdentity`]).
+    pub project_identity: Option<ProjectIdentity>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

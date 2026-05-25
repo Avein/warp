@@ -196,12 +196,15 @@ impl DataSourceStore {
     }
 
     /// Resets the [`CommandPaletteMixer`] to the projects-only source for the Alt+Tab project
-    /// switcher, which lists saved launch configs MRU-ordered (with the active project dropped).
+    /// switcher, which lists only currently-open project windows, flat and MRU-ordered.
     pub fn reset_projects_mixer(
         &mut self,
         mixer: ModelHandle<CommandPaletteMixer>,
         ctx: &mut ModelContext<Self>,
     ) {
+        self.projects_data_source.update(ctx, |source, _| {
+            source.set_surface(projects::Surface::AltTab)
+        });
         mixer.update(ctx, |mixer, ctx| {
             mixer.reset(ctx);
             mixer.add_sync_source(
@@ -209,6 +212,14 @@ impl DataSourceStore {
                 HashSet::from([QueryFilter::Projects]),
             );
             ctx.notify();
+        });
+    }
+
+    /// Selects the grouped `projects:` palette surface (open projects / open windows / available),
+    /// undoing any previous [`Self::reset_projects_mixer`] switch to the Alt+Tab surface.
+    pub fn set_projects_palette_surface(&mut self, ctx: &mut ModelContext<Self>) {
+        self.projects_data_source.update(ctx, |source, _| {
+            source.set_surface(projects::Surface::Palette)
         });
     }
 
