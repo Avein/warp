@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::SyncSender;
@@ -22,12 +23,15 @@ use warp_core::user_preferences::GetUserPreferences as _;
 use warp_graphql::billing::StripeSubscriptionPlan;
 use warpui::clipboard::ClipboardContent;
 use warpui::elements::{
-    Border, ChildAnchor, OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Stack,
+    Border, ChildAnchor, Container, CrossAxisAlignment, Dismiss, Expanded, Flex, MainAxisSize,
+    MouseStateHandle, OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Stack,
 };
 use warpui::keymap::{EditableBinding, FixedBinding};
 use warpui::platform::{TerminationMode, WindowBounds, WindowStyle};
 use warpui::presenter::ChildView;
 use warpui::rendering::OnGPUDeviceSelected;
+use warpui::ui_components::button::ButtonVariant;
+use warpui::ui_components::components::UiComponent;
 use warpui::windowing::WindowManager;
 use warpui::{
     id, AddWindowOptions, AppContext, DisplayId, Element, Entity, EntityId, FocusContext,
@@ -66,6 +70,7 @@ use crate::interval_timer::IntervalTimer;
 use crate::launch_configs::launch_config;
 use crate::launch_configs::launch_config::LaunchConfig;
 use crate::linear::LinearIssueWork;
+use crate::new_project_popup::{Event as NewProjectPopupEvent, NewProjectPopup};
 use crate::notebooks::manager::NotebookSource;
 use crate::pane_group::{NewTerminalOptions, PanesLayout};
 use crate::persistence::ModelEvent;
@@ -92,7 +97,9 @@ use crate::themes::theme::{AnsiColorIdentifier, Blend, Fill, ThemeKind, WarpThem
 use crate::uri::OpenMCPSettingsArgs;
 use crate::user_config::WarpConfig;
 use crate::util::bindings::{self, is_binding_pty_compliant};
-use crate::util::traffic_lights::{traffic_light_data, TrafficLightData, TrafficLightMouseStates};
+use crate::util::traffic_lights::{
+    traffic_light_data, TrafficLightData, TrafficLightMouseStates, TrafficLightSide,
+};
 use crate::view_components::DismissibleToast;
 use crate::window_settings::WindowSettings;
 use crate::workspace::hoa_onboarding::mark_hoa_onboarding_completed;
@@ -235,15 +242,18 @@ pub struct CloseProjectArg {
     pub name: String,
 }
 
-/// Argument for `root_view:focus_project_window`: focus an already-open window by id and mark it
-/// most-recently-used. Fired by Enter on an open row in the `projects:` palette / Alt+Tab.
-pub struct FocusWindowArg {
+/// Argument for `root_view:focus_project_workspace`: focus an already-open project-tab (workspace)
+/// in its host window and mark it most-recently-used. Fired by Enter on an open row in the
+/// `projects:` palette / Alt+Tab.
+pub struct FocusWorkspaceArg {
+    pub workspace_id: EntityId,
     pub window_id: WindowId,
 }
 
-/// Argument for `root_view:close_project_window`: close an already-open window by id. Fired by the
-/// secondary action on an open row in the `projects:` palette.
-pub struct CloseWindowArg {
+/// Argument for `root_view:close_project_workspace`: close an already-open project-tab (workspace)
+/// by id. Fired by the secondary action on an open row in the `projects:` palette.
+pub struct CloseWorkspaceArg {
+    pub workspace_id: EntityId,
     pub window_id: WindowId,
 }
 
@@ -305,9 +315,10 @@ pub fn init(app: &mut AppContext) {
     app.add_global_action("root_view:open_launch_config", open_launch_config);
     app.add_global_action("root_view:focus_or_spawn_project", focus_or_spawn_project);
     app.add_global_action("root_view:open_default_session", open_default_session);
+    app.add_global_action("root_view:show_new_project_popup", show_new_project_popup);
     app.add_global_action("root_view:close_project", close_project);
-    app.add_global_action("root_view:focus_project_window", focus_project_window);
-    app.add_global_action("root_view:close_project_window", close_project_window);
+    app.add_global_action("root_view:focus_project_workspace", focus_project_workspace);
+    app.add_global_action("root_view:close_project_workspace", close_project_workspace);
     app.add_global_action("root_view:send_feedback", send_feedback);
     app.add_global_action(
         "root_view:toggle_quake_mode_window",
@@ -359,6 +370,14 @@ pub fn init(app: &mut AppContext) {
         RootView::activate_tab_by_pane_group_id,
     );
     app.add_action("root_view:close_window", RootView::close_window);
+    app.add_action(
+        "root_view:activate_project_tab",
+        RootView::activate_project_tab,
+    );
+    app.add_action(
+        "root_view:close_new_project_popup",
+        RootView::close_new_project_popup,
+    );
     app.add_action("root_view:minimize_window", RootView::minimize_window);
     app.add_action(
         "root_view:toggle_maximize_window",
@@ -629,79 +648,95 @@ fn focus_or_spawn_project(arg: &FocusOrSpawnProjectArg, ctx: &mut AppContext) {
     let name = launch_config.name.clone();
     let identity_path = launch_config.primary_cwd().map(Path::to_path_buf);
     let origin = arg.origin;
+    let identity = ProjectIdentity {
+        name: name.clone(),
+        path: identity_path,
+        origin,
+    };
 
-    // Already open: focus and mark most-recently-used.
-    if let Some(window_id) = ProjectSwitcher::as_ref(ctx).live_window_for_name(&name, ctx) {
-        ctx.windows().show_window_and_focus_app(window_id);
-        ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.touch(window_id));
+    // Already open: focus the project-tab (activate it in its host window) and mark it MRU.
+    if let Some(workspace_id) = ProjectSwitcher::as_ref(ctx).live_workspace_for_name(&name, ctx) {
+        focus_workspace(workspace_id, ctx);
         return;
     }
 
-    // A config with no windows behaves like opening a fresh plain window.
+    // A config with no windows behaves like opening a fresh plain tab/window.
     if launch_config.windows.is_empty() {
         open_new(&(), ctx);
         return;
     }
 
-    // Reuse-if-plain: adopt the focused plain window for a single-window config.
-    let active_is_plain = active_window
-        .map(|id| !ProjectSwitcher::as_ref(ctx).is_project_window(id))
-        .unwrap_or(false);
-    if launch_config.windows.len() == 1 && active_is_plain {
-        if let Some((window_id, workspace)) = active_window.and_then(|id| {
-            WorkspaceRegistry::as_ref(ctx)
-                .get(id, ctx)
-                .map(|workspace| (id, workspace))
-        }) {
-            let window_template = launch_config.windows[0].clone();
-            workspace.update(ctx, |workspace, ctx| {
-                workspace.open_launch_config_window_replacing(window_template, ctx);
+    // One project opens as one project-tab. A multi-window config collapses to its primary (active,
+    // else first) window template, which carries the panes/tabs to open.
+    let primary_index = launch_config.active_window_index.unwrap_or(0);
+    let Some(window_template) = launch_config
+        .windows
+        .get(primary_index)
+        .or_else(|| launch_config.windows.first())
+        .cloned()
+    else {
+        open_new(&(), ctx);
+        return;
+    };
+
+    // Open the project as a new project-tab inside the active window when there is one.
+    if let Some(window_id) = active_window {
+        let root_view: Option<ViewHandle<RootView>> = ctx.root_view(window_id);
+        if let Some(root_view) = root_view {
+            root_view.update(ctx, |root_view, ctx| {
+                root_view.open_project_tab(window_template, identity, ctx);
             });
             ctx.windows().show_window_and_focus_app(window_id);
-            ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| {
-                switcher.stamp(
-                    window_id,
-                    ProjectIdentity {
-                        name,
-                        path: identity_path,
-                        origin,
-                    },
-                );
-            });
             return;
         }
     }
 
-    // Spawn each window of the launch config, stamping the active (or first) window as the project.
-    let mut first_window = None;
-    let mut project_window = None;
-    for (idx, window_template) in launch_config.windows.iter().enumerate() {
-        let (window_id, _) = open_new_with_workspace_source(
-            NewWorkspaceSource::FromTemplate {
-                window_template: window_template.clone(),
-            },
-            ctx,
-        );
-        first_window.get_or_insert(window_id);
-        let is_active = launch_config
-            .active_window_index
-            .map_or(idx == 0, |active| active == idx);
-        if is_active {
-            project_window = Some(window_id);
-        }
-    }
-
-    if let Some(window_id) = project_window.or(first_window) {
+    // No active window to host the tab: spawn a fresh window and stamp its active workspace.
+    let (window_id, _) =
+        open_new_with_workspace_source(NewWorkspaceSource::FromTemplate { window_template }, ctx);
+    if let Some(workspace_id) = WorkspaceRegistry::as_ref(ctx).active_id(window_id) {
         ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| {
-            switcher.stamp(
-                window_id,
-                ProjectIdentity {
-                    name,
-                    path: identity_path,
-                    origin,
-                },
-            );
+            switcher.stamp(workspace_id, identity);
         });
+    }
+}
+
+/// Focuses an already-open project-tab (workspace): activates it in its host window, brings that
+/// window to front, and marks it most-recently-used. No-op if the workspace has since closed.
+fn focus_workspace(workspace_id: EntityId, ctx: &mut AppContext) {
+    let Some(window_id) = WorkspaceRegistry::as_ref(ctx).window_for_workspace(workspace_id, ctx)
+    else {
+        return;
+    };
+    let root_view: Option<ViewHandle<RootView>> = ctx.root_view(window_id);
+    if let Some(root_view) = root_view {
+        root_view.update(ctx, |root_view, ctx| {
+            root_view.activate_project_tab(&workspace_id, ctx);
+        });
+    }
+    ctx.windows().show_window_and_focus_app(window_id);
+    ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.touch(workspace_id));
+}
+
+/// Closes an open project-tab (workspace). Forgets its project association, then either closes the
+/// whole OS window (if it was the last tab) or removes just that tab and activates the next one.
+fn close_workspace(workspace_id: EntityId, ctx: &mut AppContext) {
+    let registry = WorkspaceRegistry::as_ref(ctx);
+    let Some(window_id) = registry.window_for_workspace(workspace_id, ctx) else {
+        return;
+    };
+    let is_last_tab = registry.workspaces_for_window(window_id, ctx).len() <= 1;
+    ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.forget(workspace_id));
+    if is_last_tab {
+        ctx.windows()
+            .close_window(window_id, TerminationMode::Cancellable);
+    } else {
+        let root_view: Option<ViewHandle<RootView>> = ctx.root_view(window_id);
+        if let Some(root_view) = root_view {
+            root_view.update(ctx, |root_view, ctx| {
+                root_view.close_project_tab(&workspace_id, ctx);
+            });
+        }
     }
 }
 
@@ -755,33 +790,42 @@ fn open_default_session(arg: &OpenPath, ctx: &mut AppContext) {
     );
 }
 
-/// Closes the named project's window if it is currently open. Window cleanup in the switcher is
-/// handled lazily by liveness checks, so no explicit forget is needed.
+/// Opens the new-project-tab path popup (`cmd-shift-n`) in the active window, prepopulated with that
+/// window's active tab's working directory (falling back to the home dir). No-op if there is no
+/// active window.
+fn show_new_project_popup(_: &(), ctx: &mut AppContext) {
+    let Some(window_id) = ctx.windows().active_window() else {
+        return;
+    };
+    // The popup always starts from the home directory (not the active tab's cwd) so path
+    // completion begins from a predictable root rather than wherever the focused tab happens to be.
+    let initial = home_dir();
+    if let Some(root_view) = ctx.root_view(window_id) {
+        root_view.update(ctx, |root_view: &mut RootView, ctx| {
+            root_view.show_new_project_popup(initial, ctx);
+        });
+    }
+}
+
+/// Closes the named project's tab if it is currently open. Cleanup in the switcher is handled by
+/// [`close_workspace`] plus lazy liveness checks.
 fn close_project(arg: &CloseProjectArg, ctx: &mut AppContext) {
-    if let Some(window_id) = ProjectSwitcher::as_ref(ctx).live_window_for_name(&arg.name, ctx) {
-        ctx.windows()
-            .close_window(window_id, TerminationMode::Cancellable);
-        ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.forget(window_id));
+    if let Some(workspace_id) = ProjectSwitcher::as_ref(ctx).live_workspace_for_name(&arg.name, ctx)
+    {
+        close_workspace(workspace_id, ctx);
     }
 }
 
-/// Focuses an already-open window by id and marks it most-recently-used (if it is a project
-/// window). Fired by Enter on an open row in the `projects:` palette / Alt+Tab switcher.
-fn focus_project_window(arg: &FocusWindowArg, ctx: &mut AppContext) {
-    let window_id = arg.window_id;
-    if WorkspaceRegistry::as_ref(ctx).get(window_id, ctx).is_some() {
-        ctx.windows().show_window_and_focus_app(window_id);
-        ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.touch(window_id));
-    }
+/// Focuses an already-open project-tab (workspace) and marks it most-recently-used. Fired by Enter
+/// on an open row in the `projects:` palette / Alt+Tab switcher.
+fn focus_project_workspace(arg: &FocusWorkspaceArg, ctx: &mut AppContext) {
+    focus_workspace(arg.workspace_id, ctx);
 }
 
-/// Closes an already-open window by id and forgets any project association. Fired by the secondary
-/// action on an open row in the `projects:` palette.
-fn close_project_window(arg: &CloseWindowArg, ctx: &mut AppContext) {
-    let window_id = arg.window_id;
-    ctx.windows()
-        .close_window(window_id, TerminationMode::Cancellable);
-    ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.forget(window_id));
+/// Closes an already-open project-tab (workspace) and forgets any project association. Fired by the
+/// secondary action on an open row in the `projects:` palette.
+fn close_project_workspace(arg: &CloseWorkspaceArg, ctx: &mut AppContext) {
+    close_workspace(arg.workspace_id, ctx);
 }
 
 fn send_feedback(_: &(), ctx: &mut AppContext) {
@@ -897,8 +941,11 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
 
         // Check whether user has enabled session restoration.
         if *GeneralSettings::as_ref(ctx).restore_session {
-            let mut active_index = None;
-            let mut normal_window_count = 0;
+            // Quake windows stay as their own hidden window; normal (project) windows are collected
+            // and then restored as project-tabs inside a single host window rather than as separate
+            // OS windows.
+            let mut normal_windows: Vec<&WindowSnapshot> = Vec::new();
+            let mut active_normal_pos: Option<usize> = None;
             for (idx, window) in app_state.windows.iter().enumerate() {
                 // If this window is a quake window, hide it by default.
                 if window.quake_mode {
@@ -952,44 +999,16 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                         active_display_id: frame_args.display_id,
                     });
                 } else {
-                    normal_window_count += 1;
-                    if app_state
-                        .active_window_index
-                        .map(|window_idx| window_idx == idx)
-                        .unwrap_or(false)
-                    {
-                        active_index = Some(idx);
-                    } else {
-                        ctx.add_window(
-                            AddWindowOptions {
-                                window_bounds: WindowBounds::new(window.bounds),
-                                title: Some("Warp".to_owned()),
-                                fullscreen_state: window.fullscreen_state,
-                                background_blur_radius_pixels,
-                                background_blur_texture,
-                                on_gpu_driver_selected: on_gpu_driver_selected_callback(),
-                                ..Default::default()
-                            },
-                            |ctx| {
-                                let mut view = RootView::new(
-                                    global_resource_handles.clone(),
-                                    NewWorkspaceSource::Restored {
-                                        window_snapshot: window.clone(),
-                                        block_lists: app_state.block_lists.clone(),
-                                    },
-                                    ctx,
-                                );
-                                view.focus(ctx);
-                                view
-                            },
-                        );
+                    if app_state.active_window_index == Some(idx) {
+                        active_normal_pos = Some(normal_windows.len());
                     }
+                    normal_windows.push(window);
                 }
             }
 
-            // If only the quake mode window was restored (which starts hidden), create a new normal
-            // window so that something visible is created on startup.
-            if normal_window_count == 0 {
+            if normal_windows.is_empty() {
+                // Only the quake-mode window was restored (it starts hidden); create a visible
+                // normal window so something shows on startup.
                 let window_settings = WindowSettings::as_ref(ctx);
                 let options = default_window_options(window_settings, ctx);
                 ctx.add_window(options, |ctx| {
@@ -1004,19 +1023,16 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                     view.focus(ctx);
                     view
                 });
-            }
-
-            // Create the active window last to make sure it is focused on startup.
-            if let Some(idx) = active_index {
-                let window = app_state
-                    .windows
-                    .get(idx)
-                    .expect("Window should exist at idx");
-                ctx.add_window(
+            } else {
+                // Restore the previously-active project as the host window's active tab, then append
+                // the remaining projects as project-tabs (in original order) inside the same window.
+                let host_pos = active_normal_pos.unwrap_or(0);
+                let host_snapshot = normal_windows[host_pos];
+                let (_, host_root_view) = ctx.add_window(
                     AddWindowOptions {
-                        window_bounds: WindowBounds::new(window.bounds),
+                        window_bounds: WindowBounds::new(host_snapshot.bounds),
                         title: Some("Warp".to_owned()),
-                        fullscreen_state: window.fullscreen_state,
+                        fullscreen_state: host_snapshot.fullscreen_state,
                         background_blur_radius_pixels,
                         background_blur_texture,
                         on_gpu_driver_selected: on_gpu_driver_selected_callback(),
@@ -1024,9 +1040,9 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                     },
                     |ctx| {
                         let mut view = RootView::new(
-                            global_resource_handles,
+                            global_resource_handles.clone(),
                             NewWorkspaceSource::Restored {
-                                window_snapshot: window.clone(),
+                                window_snapshot: host_snapshot.clone(),
                                 block_lists: app_state.block_lists.clone(),
                             },
                             ctx,
@@ -1035,6 +1051,17 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                         view
                     },
                 );
+
+                for (pos, window) in normal_windows.iter().enumerate() {
+                    if pos == host_pos {
+                        continue;
+                    }
+                    let window_snapshot = (*window).clone();
+                    let block_lists = app_state.block_lists.clone();
+                    host_root_view.update(ctx, |root_view, ctx| {
+                        root_view.restore_project_tab(window_snapshot, block_lists, ctx);
+                    });
+                }
             }
         }
     }
@@ -1841,6 +1868,17 @@ pub struct RootView {
     /// settings to apply after a new user login / initial cloud load completes
     pending_post_auth_onboarding_settings: Option<SelectedSettings>,
     paste_auth_token_modal: Option<ViewHandle<PasteAuthTokenModalView>>,
+    /// Per-project-tab button hover/press state for the project bar, keyed by the workspace view
+    /// id. Lazily populated during render (hence the `RefCell`, since `render` takes `&self`).
+    project_tab_mouse_states: RefCell<HashMap<EntityId, MouseStateHandle>>,
+    /// Strong handles to every project-tab workspace hosted in this window. The registry only holds
+    /// weak handles, and `Terminal(handle)` only keeps the *active* one alive — so without this the
+    /// previously-active workspace would be deallocated the moment we switch tabs. Tracked lazily in
+    /// `render` (hence `RefCell`) so it also captures workspaces created via the auth/onboarding path.
+    project_workspaces: RefCell<Vec<ViewHandle<Workspace>>>,
+    /// The `cmd-shift-n` path input popup for opening a new ad-hoc project-tab. Overlaid on this
+    /// window while open (see [`Self::show_new_project_popup`]).
+    new_project_popup: ViewHandle<NewProjectPopup>,
 }
 
 impl RootView {
@@ -1919,6 +1957,11 @@ impl RootView {
 
         let needs_sso_link_view = ctx.add_typed_action_view(|_| NeedsSsoLinkView::new());
 
+        let new_project_popup = ctx.add_typed_action_view(NewProjectPopup::new);
+        ctx.subscribe_to_view(&new_project_popup, |me, _, event, ctx| {
+            me.handle_new_project_popup_event(event, ctx);
+        });
+
         #[cfg(target_family = "wasm")]
         let web_handoff_view = {
             let view = ctx.add_view(WebHandoffView::new);
@@ -1941,6 +1984,9 @@ impl RootView {
             pending_tutorial: None,
             pending_post_auth_onboarding_settings: None,
             paste_auth_token_modal: None,
+            project_tab_mouse_states: RefCell::new(HashMap::new()),
+            project_workspaces: RefCell::new(Vec::new()),
+            new_project_popup,
         };
 
         match &root_view.auth_onboarding_state {
@@ -3499,6 +3545,226 @@ impl Entity for RootView {
     type Event = RootViewEvent;
 }
 
+impl RootView {
+    /// Opens a project as a new project-tab (a `Workspace`) inside this OS window from a launch
+    /// config's window template, stamps it with `identity`, and makes it the active tab. Called by
+    /// `focus_or_spawn_project` when a project is opened from the palette while a window is focused.
+    pub fn open_project_tab(
+        &mut self,
+        window_template: launch_config::WindowTemplate,
+        identity: ProjectIdentity,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let global_resource_handles = GlobalResourceHandlesProvider::as_ref(ctx).get().clone();
+        let server_time = self.server_time.clone();
+        let workspace = ctx.add_typed_action_view(|ctx| {
+            Workspace::new(
+                global_resource_handles,
+                server_time,
+                NewWorkspaceSource::FromTemplate { window_template },
+                ctx,
+            )
+        });
+        let window_id = ctx.window_id();
+        let workspace_id = workspace.id();
+        // `Workspace::new` already registered itself; mark it the active project-tab and stamp it.
+        WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
+            registry.set_active(window_id, workspace_id);
+        });
+        ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| {
+            switcher.stamp(workspace_id, identity);
+        });
+        // Keep a strong handle so switching away from the previous active tab doesn't deallocate it.
+        self.project_workspaces.borrow_mut().push(workspace.clone());
+        self.auth_onboarding_state = AuthOnboardingState::Terminal(workspace);
+        // Move keyboard focus to the new tab's workspace, otherwise input keeps targeting the
+        // previously-active (now hidden) workspace and shortcuts appear dead.
+        self.focus(ctx);
+    }
+
+    /// Restores a persisted project as an additional project-tab in this window (used at startup to
+    /// bring back projects as tabs rather than as separate OS windows). The workspace registers and
+    /// stamps itself from the snapshot's persisted identity; we only keep a strong handle and leave
+    /// the host window's active tab unchanged.
+    pub fn restore_project_tab(
+        &mut self,
+        window_snapshot: WindowSnapshot,
+        block_lists: Arc<HashMap<PaneUuid, Vec<SerializedBlockListItem>>>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let global_resource_handles = GlobalResourceHandlesProvider::as_ref(ctx).get().clone();
+        let server_time = self.server_time.clone();
+        let workspace = ctx.add_typed_action_view(|ctx| {
+            Workspace::new(
+                global_resource_handles,
+                server_time,
+                NewWorkspaceSource::Restored {
+                    window_snapshot,
+                    block_lists,
+                },
+                ctx,
+            )
+        });
+        self.project_workspaces.borrow_mut().push(workspace);
+        ctx.notify();
+    }
+
+    /// Removes a project-tab from this window and activates the next remaining one. Assumes the
+    /// window still has another tab (the last-tab case closes the whole window instead — see
+    /// [`close_workspace`]). Returns `false` if no other tab survives.
+    fn close_project_tab(&mut self, view_id: &EntityId, ctx: &mut ViewContext<Self>) -> bool {
+        let window_id = ctx.window_id();
+        WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
+            registry.unregister_workspace(window_id, *view_id);
+        });
+        self.project_workspaces
+            .borrow_mut()
+            .retain(|w| w.id() != *view_id);
+        let Some(handle) = WorkspaceRegistry::as_ref(ctx).get(window_id, ctx) else {
+            return false;
+        };
+        WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
+            registry.set_active(window_id, handle.id());
+        });
+        self.auth_onboarding_state = AuthOnboardingState::Terminal(handle);
+        self.focus(ctx);
+        true
+    }
+
+    /// Activates an existing project-tab in this window by its workspace view id.
+    fn activate_project_tab(&mut self, view_id: &EntityId, ctx: &mut ViewContext<Self>) -> bool {
+        let window_id = ctx.window_id();
+        let handle = WorkspaceRegistry::as_ref(ctx)
+            .workspaces_for_window(window_id, ctx)
+            .into_iter()
+            .find(|workspace| workspace.id() == *view_id);
+        let Some(handle) = handle else {
+            return false;
+        };
+        WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
+            registry.set_active(window_id, *view_id);
+        });
+        self.auth_onboarding_state = AuthOnboardingState::Terminal(handle);
+        self.focus(ctx);
+        true
+    }
+
+    /// Opens the `cmd-shift-N` new-project-tab popup, prepopulated with `initial_path` (the home
+    /// directory) and selected so the first keystroke replaces it, then moves focus into it.
+    fn show_new_project_popup(&mut self, initial_path: PathBuf, ctx: &mut ViewContext<Self>) {
+        let mut initial = initial_path.to_string_lossy().into_owned();
+        // Ensure a trailing separator so the first Tab cycles the home directory's contents.
+        if !initial.ends_with('/') {
+            initial.push('/');
+        }
+        self.new_project_popup.update(ctx, |popup, ctx| {
+            popup.open(initial, ctx);
+        });
+        ctx.focus(&self.new_project_popup);
+        ctx.notify();
+    }
+
+    /// Closes the new-project-tab popup and returns focus to the workspace. Dispatched when the
+    /// popup is dismissed by clicking outside it.
+    fn close_new_project_popup(&mut self, _: &(), ctx: &mut ViewContext<Self>) -> bool {
+        self.new_project_popup
+            .update(ctx, |popup, ctx| popup.close(ctx));
+        self.focus(ctx);
+        true
+    }
+
+    /// Handles the popup's confirm / close. Confirm opens an ad-hoc project-tab at the typed path via
+    /// the shared `open_default_session` mechanism (`~` expanded); both outcomes close the popup and
+    /// return focus to the workspace.
+    fn handle_new_project_popup_event(
+        &mut self,
+        event: &NewProjectPopupEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            NewProjectPopupEvent::Confirm { path } => {
+                let trimmed = path.trim().to_string();
+                self.new_project_popup
+                    .update(ctx, |popup, ctx| popup.close(ctx));
+                self.focus(ctx);
+                if trimmed.is_empty() {
+                    return;
+                }
+                let expanded = shellexpand::tilde(&trimmed).into_owned();
+                ctx.dispatch_global_action(
+                    "root_view:open_default_session",
+                    OpenPath {
+                        path: PathBuf::from(expanded),
+                    },
+                );
+            }
+            NewProjectPopupEvent::Close => {
+                self.new_project_popup
+                    .update(ctx, |popup, ctx| popup.close(ctx));
+                self.focus(ctx);
+            }
+        }
+    }
+
+    /// Renders the project-tab bar shown above the active workspace: one button per project-tab in
+    /// this window, labelled with the project's name and the active one highlighted. Only rendered
+    /// when the window hosts more than one project-tab (see the `Terminal` arm of [`Self::render`]),
+    /// so a single-project window keeps its original chrome.
+    fn render_project_bar(&self, active_id: EntityId, app: &AppContext) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let workspaces = WorkspaceRegistry::as_ref(app).workspaces_for_window(self.window_id, app);
+        let switcher = ProjectSwitcher::as_ref(app);
+        let mut states = self.project_tab_mouse_states.borrow_mut();
+
+        // The native traffic lights live at the top-left/right of the window. Since the project bar
+        // is now the topmost row, inset it so the tabs don't sit underneath those buttons. We call
+        // the raw util (not `self.traffic_light_data`, which returns `None` in the Terminal state).
+        let traffic_lights = traffic_light_data(app, self.window_id);
+        let inset_left = traffic_lights
+            .as_ref()
+            .filter(|d| d.side == TrafficLightSide::Left)
+            .map_or(8., |d| d.width(1.) + 8.);
+        let inset_right = traffic_lights
+            .as_ref()
+            .filter(|d| d.side == TrafficLightSide::Right)
+            .map_or(8., |d| d.width(1.) + 8.);
+
+        let mut row = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
+        for workspace in workspaces.iter() {
+            let view_id = workspace.id();
+            let is_active = view_id == active_id;
+            let mouse_state = states.entry(view_id).or_default().clone();
+            let variant = if is_active {
+                ButtonVariant::Accent
+            } else {
+                ButtonVariant::Text
+            };
+            let label = switcher
+                .identity(view_id)
+                .map(|identity| identity.name.clone())
+                .unwrap_or_else(|| "untitled".to_string());
+            let button = appearance
+                .ui_builder()
+                .button(variant, mouse_state)
+                .with_text_label(label)
+                .build()
+                .on_click(move |ctx, _app, _v2f| {
+                    ctx.dispatch_action("root_view:activate_project_tab", view_id);
+                })
+                .finish();
+            row.add_child(Container::new(button).with_margin_right(4.).finish());
+        }
+
+        Container::new(row.finish())
+            .with_padding_left(inset_left)
+            .with_padding_right(inset_right)
+            .with_padding_top(4.)
+            .with_padding_bottom(4.)
+            .with_background(appearance.theme().surface_2())
+            .finish()
+    }
+}
+
 impl View for RootView {
     fn ui_name() -> &'static str {
         "RootView"
@@ -3506,6 +3772,12 @@ impl View for RootView {
 
     fn on_focus(&mut self, focus_ctx: &FocusContext, ctx: &mut ViewContext<Self>) {
         if focus_ctx.is_self_focused() {
+            // While the new-project-tab popup is open it owns keyboard focus, so its input receives
+            // typing / Enter / Escape rather than the workspace beneath it.
+            if self.new_project_popup.as_ref(ctx).is_open() {
+                ctx.focus(&self.new_project_popup);
+                return;
+            }
             self.focus(ctx);
         } else if self.paste_auth_token_modal.is_some() {
             // Modal is open — focus belongs to the editor inside it.
@@ -3546,7 +3818,34 @@ impl View for RootView {
             AuthOnboardingState::LoginSlide {
                 login_slide_view, ..
             } => ChildView::new(login_slide_view).finish(),
-            AuthOnboardingState::Terminal(workspace) => ChildView::new(workspace).finish(),
+            AuthOnboardingState::Terminal(workspace) => {
+                // Capture a strong handle to the active workspace if we don't already hold one. This
+                // covers the initial workspace (created in `new`) and any created via the auth path,
+                // so they survive being switched away from. `open_project_tab` tracks its own.
+                {
+                    let mut tracked = self.project_workspaces.borrow_mut();
+                    if !tracked.iter().any(|w| w.id() == workspace.id()) {
+                        tracked.push(workspace.clone());
+                    }
+                }
+                // Only show the project-tab bar once this window hosts more than one project-tab;
+                // a single-project window keeps its original chrome (no bolt-on bar).
+                let tab_count = WorkspaceRegistry::as_ref(app)
+                    .workspaces_for_window(self.window_id, app)
+                    .len();
+                if tab_count > 1 {
+                    let bar = self.render_project_bar(workspace.id(), app);
+                    let mut column = Flex::column().with_main_axis_size(MainAxisSize::Max);
+                    column.add_child(bar);
+                    column.add_child(Box::new(Expanded::new(
+                        1.0,
+                        ChildView::new(workspace).finish(),
+                    )));
+                    column.finish()
+                } else {
+                    ChildView::new(workspace).finish()
+                }
+            }
         };
 
         let mut stack = Stack::new();
@@ -3554,6 +3853,15 @@ impl View for RootView {
 
         if let Some(modal) = &self.paste_auth_token_modal {
             stack.add_child(ChildView::new(modal).finish());
+        }
+
+        if self.new_project_popup.as_ref(app).is_open() {
+            let popup = Dismiss::new(ChildView::new(&self.new_project_popup).finish())
+                .on_dismiss(|ctx, _app| {
+                    ctx.dispatch_action("root_view:close_new_project_popup", ());
+                })
+                .finish();
+            stack.add_child(popup);
         }
 
         if let Some(traffic_light_data) = self.traffic_light_data(app) {

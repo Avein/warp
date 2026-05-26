@@ -1929,7 +1929,9 @@ pub fn init(app: &mut AppContext) {
         .with_context_predicate(
             id!("Input") & id!(flags::IS_ANY_AI_ENABLED) & id!("TerminalView_NonEmptyBlockList"),
         )
-        .with_mac_key_binding("cmd-shift-N")
+        // Moved off `cmd-shift-N` (now the projects new-project-tab popup) to `ctrl-alt-n`; in the
+        // terminal Input context this binding otherwise shadowed the popup.
+        .with_mac_key_binding("ctrl-alt-n")
         .with_linux_or_windows_key_binding("ctrl-alt-shift-N"),
         EditableBinding::new(
             "input:enable_auto_detection",

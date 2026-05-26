@@ -294,7 +294,9 @@ use crate::resource_center::{
     ResourceCenterEvent, ResourceCenterPage, ResourceCenterView, Tip, TipAction, TipsCompleted,
 };
 use crate::reward_view::{RewardEvent, RewardKind, RewardView};
-use crate::root_view::{quake_mode_window_id, NewWorkspaceSource, OpenLaunchConfigArg};
+use crate::root_view::{
+    quake_mode_window_id, CloseWorkspaceArg, NewWorkspaceSource, OpenLaunchConfigArg,
+};
 use crate::search::command_palette::view::{
     Event as CommandPaletteEvent, NavigationMode, View as CommandPalette,
 };
@@ -3229,22 +3231,23 @@ impl Workspace {
         ws.sync_settings_error_state_into_settings_pane(ctx);
 
         let weak_handle = ctx.handle();
+        let workspace_id = weak_handle.id();
         WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
             registry.register(window_id, weak_handle);
         });
 
-        // Claim the very first *unstamped* window of the session as the "root project" so it
+        // Claim the very first *unstamped* project-tab of the session as the "root project" so it
         // appears in the projects palette and Alt+Tab immediately, without a saved config. Restored
-        // windows are already stamped above from their persisted cwd, so this only fires for a fresh
+        // tabs are already stamped above from their persisted cwd, so this only fires for a fresh
         // empty start; the short-circuit keeps `claim_root` unconsumed until a genuinely unstamped
-        // window is seen. Its path is read live from the active session (shown as `~` at home).
-        let already_stamped = ProjectSwitcher::as_ref(ctx).is_project_window(window_id);
+        // tab is seen. Its path is read live from the active session (shown as `~` at home).
+        let already_stamped = ProjectSwitcher::as_ref(ctx).is_project(workspace_id);
         if !already_stamped
             && ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.claim_root())
         {
             ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| {
                 switcher.stamp(
-                    window_id,
+                    workspace_id,
                     ProjectIdentity {
                         name: "~".to_string(),
                         path: None,
@@ -3687,9 +3690,9 @@ impl Workspace {
                     }),
                 };
                 if let Some(identity) = restored_identity {
-                    let window_id = ctx.window_id();
+                    let workspace_id = ctx.handle().id();
                     ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| {
-                        switcher.stamp(window_id, identity);
+                        switcher.stamp(workspace_id, identity);
                     });
                 }
 
@@ -6845,6 +6848,16 @@ impl Workspace {
 
     pub fn active_terminal_id(&self, app: &AppContext) -> Option<EntityId> {
         self.read_from_active_terminal_view(app, |terminal| terminal.id())
+    }
+
+    /// The working directory of this workspace's active terminal session, if it's local. Unlike
+    /// [`ActiveSession`], this reads the workspace directly, so it's correct even for a background
+    /// (non-active) tab in a multi-workspace window — used to render per-tab paths in the projects
+    /// palette.
+    pub fn active_session_path(&self, app: &AppContext) -> Option<PathBuf> {
+        self.active_tab_pane_group()
+            .as_ref(app)
+            .active_session_path(app)
     }
 
     /// Retrieves the entity id of the active current active input. This is needed
@@ -10071,6 +10084,7 @@ impl Workspace {
     pub fn snapshot(
         &self,
         window_id: WindowId,
+        workspace_id: EntityId,
         quake_mode: bool,
         app: &AppContext,
     ) -> WindowSnapshot {
@@ -10216,9 +10230,9 @@ impl Workspace {
                 .read(app, |view, _| view.get_filters()),
         );
 
-        // Persist the project identity (name + origin) of a project window so a restart can restore
-        // it without re-deriving the name from the (possibly since-changed) tab cwd.
-        let project_identity = ProjectSwitcher::as_ref(app).identity(window_id).cloned();
+        // Persist the project identity (name + origin) of *this* project-tab so a restart can
+        // restore it without re-deriving the name from the (possibly since-changed) tab cwd.
+        let project_identity = ProjectSwitcher::as_ref(app).identity(workspace_id).cloned();
 
         WindowSnapshot {
             tabs,
@@ -10527,6 +10541,22 @@ impl Workspace {
         true
     }
 
+    /// Whether this workspace is the only project-tab in its OS window. When other project-tabs
+    /// share the window, closing this workspace's last session-tab should close just this workspace
+    /// and leave the window (and its siblings) open; only the sole project-tab closes the window.
+    fn is_only_project_tab(&self, ctx: &ViewContext<Self>) -> bool {
+        // This runs while `self` is mid-update (e.g. inside `cmd+w` handling), so `self`'s own weak
+        // handle can't upgrade and `workspaces_for_window` returns only the *other* project-tabs.
+        // We are the only project-tab exactly when no others remain; counting `<= 1` would wrongly
+        // treat the second-to-last tab as the last and close the whole window.
+        let window_id = ctx.window_id();
+        let self_id = ctx.handle().id();
+        WorkspaceRegistry::as_ref(ctx)
+            .workspaces_for_window(window_id, ctx)
+            .into_iter()
+            .all(|w| w.id() == self_id)
+    }
+
     fn remove_tab(
         &mut self,
         index: usize,
@@ -10543,11 +10573,26 @@ impl Workspace {
         self.vertical_tabs_panel
             .clear_detail_sidecar_if_for_pane_group(pane_group.id());
 
-        // If this is the last tab, close the window instead of actually removing
-        // the tab.
+        // Closing the last session-tab leaves this workspace empty. With the projects-as-tabs model
+        // a window can host several project-tabs (workspaces): close just this one and keep the
+        // window (and its siblings) alive, only falling back to closing the OS window when this was
+        // the sole project-tab. The workspace close is deferred via a global action so this view is
+        // not dropped mid-method.
         if self.tabs.len() == 1 {
             if ContextFlag::CloseWindow.is_enabled() {
-                ctx.close_window();
+                if self.is_only_project_tab(ctx) {
+                    ctx.close_window();
+                } else {
+                    let window_id = ctx.window_id();
+                    let workspace_id = ctx.handle().id();
+                    ctx.dispatch_global_action(
+                        "root_view:close_project_workspace",
+                        CloseWorkspaceArg {
+                            workspace_id,
+                            window_id,
+                        },
+                    );
+                }
             }
             return;
         }
@@ -10663,7 +10708,6 @@ impl Workspace {
                 .map(|tab| tab.downgrade())
                 .collect_vec();
             let summary = UnsavedStateSummary::for_tabs(tabs, ctx);
-
             if summary.should_display_warning(ctx) {
                 // The quit-warning dialog uses app-scoped callbacks (ironically, because that's
                 // what Self::show_native_modal expects). That means we need a handle to the
@@ -10749,10 +10793,16 @@ impl Workspace {
             return;
         }
 
+        // Closing the last session-tab tears down its container. When this is the window's sole
+        // project-tab the window closes and *its* confirmation covers the running processes, so we
+        // skip the per-tab prompt (original behavior). But when other project-tabs share the window
+        // only this workspace closes — no window-close prompt will fire — so the per-tab confirmation
+        // must run here.
+        let window_close_handles_confirmation = is_last_tab && self.is_only_project_tab(ctx);
         let tabs_closed = self.close_tabs(
             vec![index].into_iter(),
             OpenDialogSource::CloseTab { tab_index: index },
-            skip_confirmation || is_last_tab, // If this is the last tab, the confirmation dialog will be handled by the window close.
+            skip_confirmation || window_close_handles_confirmation,
             add_to_undo_stack,
             ctx,
         );
@@ -22463,6 +22513,9 @@ impl TypedActionView for Workspace {
             }
             AddWindow => {
                 ctx.dispatch_global_action("root_view:open_new", ());
+            }
+            NewProjectTab => {
+                ctx.dispatch_global_action("root_view:show_new_project_popup", ());
             }
             AddWindowWithShell { shell } => {
                 ctx.dispatch_global_action("root_view:open_new_with_shell", Some(shell.clone()));

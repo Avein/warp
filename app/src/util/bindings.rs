@@ -132,6 +132,7 @@ pub enum CustomAction {
     GoToLine,
     ToggleGlobalSearch,
     ToggleConversationListView,
+    NewProjectTab,
 }
 
 lazy_static! {
@@ -383,8 +384,13 @@ pub fn custom_tag_to_keystroke(custom: CustomTag) -> Option<Keystroke> {
             }
         }
 
-        // This is one of the app's hardcoded keybindings.
-        CustomAction::AddWindow => Keystroke::parse(cmd_or_ctrl_shift("n")).ok(),
+        // A new OS window is created via `cmd-n` (the "New Window" menu item); the old `cmd-shift-n`
+        // duplicate now opens the new-project-tab popup (`CustomAction::NewProjectTab`), so this
+        // action keeps its dispatch but no longer owns a default keystroke.
+        CustomAction::AddWindow => None,
+        // The new-project-tab popup (`cmd-shift-N`) is bound via an `EditableBinding` in
+        // `workspace::register_fixed_bindings`, not as a custom action, so this owns no keystroke.
+        CustomAction::NewProjectTab => None,
         CustomAction::ToggleWarpDrive => {
             if OperatingSystem::get().is_mac() {
                 Keystroke::parse("cmd-\\").ok()

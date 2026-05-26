@@ -311,6 +311,20 @@ pub fn init(app: &mut AppContext) {
         ),
     ]);
 
+    // Opens the new-project-tab path popup. Registered as an editable binding with an explicit
+    // keystroke (rather than a `FixedBinding::custom`) because there is no Mac menu item backing
+    // this action — on macOS custom-trigger fixed bindings only fire through the menu bar, so a
+    // real keystroke binding is required for `cmd-shift-n` to actually reach the action.
+    app.register_editable_bindings([EditableBinding::new(
+        "workspace:new_project_tab",
+        "New Project Tab",
+        WorkspaceAction::NewProjectTab,
+    )
+    .with_context_predicate(id!("Workspace"))
+    .with_mac_key_binding("cmd-shift-N")
+    .with_linux_or_windows_key_binding("ctrl-alt-n")
+    .with_enabled(|| ContextFlag::CreateNewSession.is_enabled())]);
+
     if FeatureFlag::UIZoom.is_enabled() {
         app.register_fixed_bindings([
             FixedBinding::custom(

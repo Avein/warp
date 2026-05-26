@@ -49,7 +49,8 @@ pub fn init(app: &mut AppContext) {
         )
         .with_context_predicate(id!("WelcomeView"))
         .with_group(BindingGroup::Folders.as_str())
-        .with_mac_key_binding("cmd-shift-N")
+        // Moved off `cmd-shift-N` (now the projects new-project-tab popup) to `ctrl-alt-n`.
+        .with_mac_key_binding("ctrl-alt-n")
         .with_linux_or_windows_key_binding("alt-n"),
     ]);
 }

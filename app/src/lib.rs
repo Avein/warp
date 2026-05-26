@@ -49,6 +49,7 @@ mod login_item;
 mod menu;
 mod modal;
 mod network;
+mod new_project_popup;
 mod notebooks;
 mod notification;
 mod palette;

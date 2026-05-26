@@ -346,6 +346,8 @@ pub enum WorkspaceAction {
     AddWindowWithShell {
         shell: AvailableShell,
     },
+    /// Opens the new-project-tab path popup (`cmd-shift-n`) in the active window.
+    NewProjectTab,
     /// Moves focus to the panel on the left
     FocusLeftPanel,
     /// Moves focus to the panel on the right
@@ -821,6 +823,7 @@ impl WorkspaceAction {
             | IncreaseZoom
             | DecreaseZoom
             | ResetZoom
+            | NewProjectTab
             | OpenPalette { .. }
             | TogglePalette { mode: _, source: _ }
             | ShowUpgrade
