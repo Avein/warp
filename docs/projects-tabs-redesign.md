@@ -296,6 +296,46 @@ the tab `cwd` changed; Default re-derives from the current cwd basename.
   correctly), but `UnsavedStateSummary::should_display_warning` short-circuits to `false` when the
   setting is off, so no dialog appears. This was confirmed with the setting at `false`.
 
+### Phase 6 — Merge Windows (DEFERRED — not implemented)
+
+**TODO / not built.** Decision (2026-05-27): deferred indefinitely. The author doesn't need it —
+regrouping windows can be achieved by restarting the app (Phase 7 persistence restores the
+consolidated layout). No code was written; the design below stands as the implementation plan for a
+future pickup.
+
+**Intended behavior** (see the "Merge windows" section above): target = focused window; a picker of
+the *other* OS windows; on confirm each chosen window's workspaces re-parent into the target as
+project-tabs (source order, MRU preserved), and the emptied source windows close.
+
+**Implementation plan (grounded in the existing machinery):**
+- Views are window-bound and **cannot migrate** across windows, so a merge must *reconstruct* each
+  tab's `PaneGroup` in the target window — exactly what cross-window tab drag already does
+  (`workspace/cross_window_tab_drag.rs`).
+- Per chosen source window, enumerate its workspaces via
+  `WorkspaceRegistry::workspaces_for_window(window_id, app)` (tab order).
+- Per source workspace → create one new project-tab in the target `RootView` (the open-flow already
+  builds workspaces via `NewWorkspaceSource`; `NewWorkspaceSource::TransferredTab` exists for the
+  first tab), carrying its `ProjectIdentity` stamp so it stays the same project in the palette/MRU.
+- Move each of that workspace's session-tabs across with the proven
+  `Workspace::get_tab_transfer_info(index)` → `insert_transferred_tab_at_index(tab, index)` path
+  (`workspace/view.rs:24844`/`24882`), the same `TransferredTab` flow as drag.
+- Close each emptied source window with
+  `ctx.windows().close_window(window_id, TerminationMode::ContentTransferred)` (silent, no
+  "Close window?" prompt — content was preserved). `close_window_for_content_transfer`
+  (`view.rs:24876`) is the reference.
+- Enumerate windows with `WindowManager::ordered_window_ids()`; the projects palette data source
+  (`search/command_palette/projects/data_source.rs`) already lists windows + their project labels and
+  is the model for building the picker's row labels.
+
+**Open decisions (resolve before building):**
+- **Picker UI**: the spec calls for a multi-select checklist modal (host it like `new_project_popup`
+  / `paste_auth_token_modal` via `Dismiss` + `stack.add_child`; checkboxes via
+  `Appearance::checkbox`). A simpler first cut is a no-picker "merge ALL other windows" command.
+- **Trigger**: command-palette entry (no chord) vs. also a keybinding (would need a verified-free
+  chord; `cmd-shift-N` and `cmd-shift-W` are taken).
+- **Persistence**: no new work expected — the registry is the source of truth, so the next snapshot
+  records the new grouping automatically.
+
 ### Touched files
 
 `workspace/registry.rs`, `workspace/project_switcher.rs`, `workspace/view.rs`,
@@ -325,7 +365,7 @@ cargo test   -p warp --features gui -- persistence::sqlite launch_configs::launc
 - Switching project-tabs swaps the session-tab strip; Alt+Tab toggles within the current window.
 - One launch config opens as exactly one project-tab (multi-window flattened).
 - Closing the last session-tab closes the workspace; closing the last workspace closes the window.
-- "Merge Windows" pulls selected other windows' projects into the focused window.
+- ~~"Merge Windows" pulls selected other windows' projects into the focused window.~~ (deferred — see Phase 6)
 - After restart, the consolidated multi-project window comes back intact (grouping persisted).
 </content>
 </invoke>
