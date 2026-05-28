@@ -2464,11 +2464,11 @@ fn test_vertical_tabs_panel_visibility_restores_from_window_snapshot() {
 
         let closed_snapshot = workspace.update(&mut app, |workspace, ctx| {
             workspace.vertical_tabs_panel_open = false;
-            workspace.snapshot(ctx.window_id(), false, ctx)
+            workspace.snapshot(ctx.window_id(), ctx.handle().id(), false, ctx)
         });
         let open_snapshot = workspace.update(&mut app, |workspace, ctx| {
             workspace.vertical_tabs_panel_open = true;
-            workspace.snapshot(ctx.window_id(), false, ctx)
+            workspace.snapshot(ctx.window_id(), ctx.handle().id(), false, ctx)
         });
 
         let restored_closed = restored_workspace(&mut app, closed_snapshot);
@@ -2502,7 +2502,7 @@ fn test_vertical_tabs_panel_restored_open_when_show_in_restored_windows_enabled(
 
         let closed_snapshot = workspace.update(&mut app, |workspace, ctx| {
             workspace.vertical_tabs_panel_open = false;
-            workspace.snapshot(ctx.window_id(), false, ctx)
+            workspace.snapshot(ctx.window_id(), ctx.handle().id(), false, ctx)
         });
 
         let restored = restored_workspace(&mut app, closed_snapshot);
@@ -2531,7 +2531,7 @@ fn test_vertical_tabs_panel_closed_when_disabled_even_if_persisted_open() {
         let workspace = mock_workspace(&mut app);
         let open_snapshot = workspace.update(&mut app, |workspace, ctx| {
             workspace.vertical_tabs_panel_open = true;
-            workspace.snapshot(ctx.window_id(), false, ctx)
+            workspace.snapshot(ctx.window_id(), ctx.handle().id(), false, ctx)
         });
 
         // Disable vertical tabs, then restore. The panel must stay closed.

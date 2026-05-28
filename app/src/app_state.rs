@@ -343,38 +343,39 @@ pub struct PaneFlex(pub f32);
 pub fn get_app_state(app: &AppContext) -> AppState {
     let active_window_id = app.windows().active_window();
     let quake_mode_id = quake_mode_window_id();
+    let registry = WorkspaceRegistry::as_ref(app);
+
+    // The globally-active project-tab is the active workspace of the active window. On restore it
+    // becomes the host window's active tab.
+    let active_workspace_id = active_window_id.and_then(|id| registry.active_id(id));
 
     let mut active_window_index = None;
-
     let mut windows = vec![];
 
-    for (index, window_id) in app.window_ids().enumerate() {
-        // Determine index of active window
-        if let Some(active_window_id) = active_window_id {
-            if active_window_id == window_id {
-                active_window_index = Some(index);
-            }
+    // Snapshot *every* project-tab (workspace), not just the active one per OS window — otherwise
+    // background tabs are dropped on save and lost on the next restore. Restore recombines these
+    // into project-tabs (see `open_from_restored`).
+    for (window_id, workspace) in registry.all_workspaces(app) {
+        let ws = workspace.as_ref(app);
+        // Transient drag-preview windows are not real user-visible workspaces; skip them so they
+        // never end up in the persisted session. (Persistence is also short-circuited entirely
+        // while a cross-window drag is active; see `save_app` in `workspace/global_actions.rs`.)
+        if ws.is_tab_drag_preview() {
+            continue;
         }
-
-        if let Some(workspace) = WorkspaceRegistry::as_ref(app).get(window_id, app) {
-            let ws = workspace.as_ref(app);
-            // Transient drag-preview windows are not real user-visible
-            // workspaces; skip them so they never end up in the persisted
-            // session. (Persistence is also short-circuited entirely while a
-            // cross-window drag is active; see `save_app` in
-            // `workspace/global_actions.rs`.)
-            if ws.is_tab_drag_preview() {
-                continue;
-            }
-            let snapshot = ws.snapshot(
-                window_id,
-                quake_mode_id.map(|id| id == window_id).unwrap_or(false),
-                app,
-            );
-            if !snapshot.tabs.is_empty() {
-                windows.push(snapshot);
-            }
+        let snapshot = ws.snapshot(
+            window_id,
+            workspace.id(),
+            quake_mode_id.map(|id| id == window_id).unwrap_or(false),
+            app,
+        );
+        if snapshot.tabs.is_empty() {
+            continue;
         }
+        if Some(workspace.id()) == active_workspace_id {
+            active_window_index = Some(windows.len());
+        }
+        windows.push(snapshot);
     }
 
     AppState {
