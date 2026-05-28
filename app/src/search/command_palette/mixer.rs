@@ -69,15 +69,17 @@ pub enum CommandPaletteItemAction {
     CloseProject {
         config: Arc<LaunchConfig>,
     },
-    /// Focus an already-open window by id. Fired by Enter on an "Open Projects" or "Open Windows"
-    /// row in the `projects:` palette (and by the Alt+Tab switcher), where the target is a concrete
-    /// live window rather than a launch config.
-    FocusWindow {
+    /// Focus an already-open project-tab (workspace) in its host window. Fired by Enter on an "Open
+    /// Projects" or "Open Windows" row in the `projects:` palette (and by the Alt+Tab switcher),
+    /// where the target is a concrete live project-tab rather than a launch config.
+    FocusWorkspace {
+        workspace_id: EntityId,
         window_id: WindowId,
     },
-    /// Close an already-open window by id. Fired by the secondary action (Cmd/Shift+Enter) on an
-    /// open row in the `projects:` palette.
-    CloseWindow {
+    /// Close an already-open project-tab (workspace) by id. Fired by the secondary action
+    /// (Cmd/Shift+Enter) on an open row in the `projects:` palette.
+    CloseWorkspace {
+        workspace_id: EntityId,
         window_id: WindowId,
     },
     NewSession {
@@ -141,8 +143,8 @@ impl CommandPaletteItemAction {
             // participate in the palette's generic "recent items" tracking.
             CommandPaletteItemAction::FocusOrSpawnProject { .. }
             | CommandPaletteItemAction::CloseProject { .. }
-            | CommandPaletteItemAction::FocusWindow { .. }
-            | CommandPaletteItemAction::CloseWindow { .. } => ItemSummary::NoOp,
+            | CommandPaletteItemAction::FocusWorkspace { .. }
+            | CommandPaletteItemAction::CloseWorkspace { .. } => ItemSummary::NoOp,
             CommandPaletteItemAction::ViewInWarpDrive { id } => match id {
                 CloudObjectTypeAndId::Notebook(_)
                 | CloudObjectTypeAndId::Folder(_)

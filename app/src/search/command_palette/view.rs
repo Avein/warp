@@ -27,7 +27,8 @@ use crate::drive::CloudObjectTypeAndId;
 use crate::features::FeatureFlag;
 use crate::palette::PaletteMode;
 use crate::root_view::{
-    CloseProjectArg, CloseWindowArg, FocusOrSpawnProjectArg, FocusWindowArg, OpenLaunchConfigArg,
+    CloseProjectArg, CloseWorkspaceArg, FocusOrSpawnProjectArg, FocusWorkspaceArg,
+    OpenLaunchConfigArg,
 };
 use crate::search::action::search_item::MatchedBinding;
 use crate::search::binding_source::{BindingFilterFn, BindingSource};
@@ -952,16 +953,28 @@ impl View {
                     },
                 );
             }
-            CommandPaletteItemAction::FocusWindow { window_id } => {
+            CommandPaletteItemAction::FocusWorkspace {
+                workspace_id,
+                window_id,
+            } => {
                 ctx.dispatch_global_action(
-                    "root_view:focus_project_window",
-                    FocusWindowArg { window_id },
+                    "root_view:focus_project_workspace",
+                    FocusWorkspaceArg {
+                        workspace_id,
+                        window_id,
+                    },
                 );
             }
-            CommandPaletteItemAction::CloseWindow { window_id } => {
+            CommandPaletteItemAction::CloseWorkspace {
+                workspace_id,
+                window_id,
+            } => {
                 ctx.dispatch_global_action(
-                    "root_view:close_project_window",
-                    CloseWindowArg { window_id },
+                    "root_view:close_project_workspace",
+                    CloseWorkspaceArg {
+                        workspace_id,
+                        window_id,
+                    },
                 );
             }
             CommandPaletteItemAction::ExecuteWorkflow { id } => {

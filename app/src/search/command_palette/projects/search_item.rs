@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ordered_float::OrderedFloat;
-use warpui::{AppContext, Element, SingletonEntity, WindowId};
+use warpui::{AppContext, Element, EntityId, SingletonEntity, WindowId};
 
 use crate::appearance::Appearance;
 use crate::launch_configs::launch_config::LaunchConfig;
@@ -14,9 +14,9 @@ use crate::workspace::ProjectOrigin;
 
 /// SearchItem for a row in the `projects:` palette / Alt+Tab switcher.
 ///
-/// A row is one of two kinds, distinguished by [`Self::target_window`]:
-/// - an **open** row targets a concrete live window (an open project or a plain `cmd+n` window):
-///   Enter focuses it and the secondary action closes it;
+/// A row is one of two kinds, distinguished by [`Self::target`]:
+/// - an **open** row targets a concrete live project-tab (a workspace) and the OS window hosting it
+///   (an open project or a plain `cmd+n` tab): Enter focuses it and the secondary action closes it;
 /// - an **available** row targets a saved [`LaunchConfig`] (a project or a path-less template):
 ///   Enter focuses-or-spawns it.
 ///
@@ -28,10 +28,11 @@ pub struct SearchItem {
     launch_config: Arc<LaunchConfig>,
     matched_indices: Vec<usize>,
     sort_score: f64,
-    /// Whether this row represents a currently-open window (accent icon + "open" pill).
+    /// Whether this row represents a currently-open project-tab (accent icon + "open" pill).
     is_open: bool,
-    /// The live window this row targets, if it is an open row. `None` for available configs.
-    target_window: Option<WindowId>,
+    /// The live project-tab (workspace) and its host window this row targets, if it is an open row.
+    /// `None` for available configs.
+    target: Option<(EntityId, WindowId)>,
     /// Home-relative working directory shown below the name.
     path: Option<String>,
     /// Current git branch of the working directory, shown as a pill.
@@ -56,17 +57,18 @@ impl SearchItem {
             matched_indices,
             sort_score,
             is_open: false,
-            target_window: None,
+            target: None,
             path,
             branch,
             origin: Some(origin),
         }
     }
 
-    /// Builds an open-window row (open project or plain window) targeting `window_id`. `origin` is
-    /// `None` for a plain window.
+    /// Builds an open project-tab row (open project or plain tab) targeting the workspace
+    /// `workspace_id` hosted in `window_id`. `origin` is `None` for a plain tab.
     pub fn open_window(
         name: String,
+        workspace_id: EntityId,
         window_id: WindowId,
         matched_indices: Vec<usize>,
         sort_score: f64,
@@ -83,7 +85,7 @@ impl SearchItem {
             matched_indices,
             sort_score,
             is_open: true,
-            target_window: Some(window_id),
+            target: Some((workspace_id, window_id)),
             path,
             branch,
             origin,
@@ -138,7 +140,7 @@ impl crate::search::item::SearchItem for SearchItem {
             self.matched_indices.clone(),
             self.is_open,
             project,
-            self.target_window.is_none(),
+            self.target.is_none(),
         )
     }
 
@@ -147,8 +149,11 @@ impl crate::search::item::SearchItem for SearchItem {
     }
 
     fn accept_result(&self) -> Self::Action {
-        match self.target_window {
-            Some(window_id) => CommandPaletteItemAction::FocusWindow { window_id },
+        match self.target {
+            Some((workspace_id, window_id)) => CommandPaletteItemAction::FocusWorkspace {
+                workspace_id,
+                window_id,
+            },
             None => CommandPaletteItemAction::FocusOrSpawnProject {
                 config: self.launch_config.clone(),
             },
@@ -156,8 +161,11 @@ impl crate::search::item::SearchItem for SearchItem {
     }
 
     fn execute_result(&self) -> Self::Action {
-        match self.target_window {
-            Some(window_id) => CommandPaletteItemAction::CloseWindow { window_id },
+        match self.target {
+            Some((workspace_id, window_id)) => CommandPaletteItemAction::CloseWorkspace {
+                workspace_id,
+                window_id,
+            },
             // Available configs aren't open, so the secondary "close" action is a no-op.
             None => CommandPaletteItemAction::NoOp,
         }
