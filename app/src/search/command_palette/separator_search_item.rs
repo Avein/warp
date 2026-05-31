@@ -37,10 +37,13 @@ impl SearchItem for SeparatorSearchItem {
     ) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
 
+        // Section header sits visually between the +2pt project name and the plain-monospace
+        // path subtitle; use plain `monospace_font_size()` so the three text tiers (header /
+        // path / name) read as a clean small → medium → large progression. Was `* 0.85`.
         Text::new_inline(
             self.title.clone(),
             appearance.ui_font_family(),
-            appearance.monospace_font_size() * 0.85,
+            appearance.monospace_font_size(),
         )
         .with_color(
             appearance

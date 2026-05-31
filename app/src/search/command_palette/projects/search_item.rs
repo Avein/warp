@@ -5,7 +5,7 @@ use warpui::{AppContext, Element, EntityId, SingletonEntity, WindowId};
 
 use crate::appearance::Appearance;
 use crate::launch_configs::launch_config::LaunchConfig;
-use crate::search::command_palette::launch_config::renderer::ProjectRowDetails;
+use crate::search::command_palette::launch_config::renderer::{DiffStats, ProjectRowDetails};
 use crate::search::command_palette::mixer::CommandPaletteItemAction;
 use crate::search::command_palette::render_util::render_search_item_icon;
 use crate::search::result_renderer::ItemHighlightState;
@@ -37,6 +37,9 @@ pub struct SearchItem {
     path: Option<String>,
     /// Current git branch of the working directory, shown as a pill.
     branch: Option<String>,
+    /// Working-tree-vs-HEAD diff stats for the working directory, shown as a `📄 N · +X -Y` pill
+    /// next to the branch. `None` when the directory is not a git repo or has no diffable state.
+    diff_stats: Option<DiffStats>,
     /// Project origin, picking the row's icon (project vs template vs default). `None` for a plain
     /// (`cmd+n`) window.
     origin: Option<ProjectOrigin>,
@@ -50,6 +53,7 @@ impl SearchItem {
         sort_score: f64,
         path: Option<String>,
         branch: Option<String>,
+        diff_stats: Option<DiffStats>,
         origin: ProjectOrigin,
     ) -> Self {
         Self {
@@ -60,6 +64,7 @@ impl SearchItem {
             target: None,
             path,
             branch,
+            diff_stats,
             origin: Some(origin),
         }
     }
@@ -74,6 +79,7 @@ impl SearchItem {
         sort_score: f64,
         path: Option<String>,
         branch: Option<String>,
+        diff_stats: Option<DiffStats>,
         origin: Option<ProjectOrigin>,
     ) -> Self {
         Self {
@@ -88,6 +94,7 @@ impl SearchItem {
             target: Some((workspace_id, window_id)),
             path,
             branch,
+            diff_stats,
             origin,
         }
     }
@@ -128,19 +135,28 @@ impl crate::search::item::SearchItem for SearchItem {
         app: &AppContext,
     ) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
-        let project = self.path.clone().map(|path| ProjectRowDetails {
-            path,
+        // Always pass `Some(ProjectRowDetails)`, even for path-less templates (e.g. `default`).
+        // The renderer treats the presence of details as "use the projects-palette row style"
+        // (60pt row, +2pt name) and renders the path subtitle conditionally — so every row in
+        // this palette looks uniform regardless of whether the underlying config has a cwd.
+        let project = Some(ProjectRowDetails {
+            path: self.path.clone(),
             branch: self.branch.clone(),
+            diff_stats: self.diff_stats.clone(),
         });
-        // Open rows have a synthetic (window-less) config, so suppress the "N windows / N tabs"
-        // description; available configs show it.
+        // For the projects: palette we deliberately suppress both the "open" chip and the
+        // "N windows / N tabs" description pills: the section header (Open Projects / Available)
+        // already conveys open-vs-available, and the window/tab count belongs to the regular
+        // launch-configs palette, not here. Pass `is_open=false` and `show_description=false`
+        // unconditionally — the regular launch-configs palette still flips them on at its own
+        // call site.
         self.launch_config.render(
             appearance,
             highlight_state,
             self.matched_indices.clone(),
-            self.is_open,
+            false,
             project,
-            self.target.is_none(),
+            false,
         )
     }
 

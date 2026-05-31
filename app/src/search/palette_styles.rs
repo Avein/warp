@@ -43,8 +43,12 @@ lazy_static::lazy_static! {
             result_vertical_padding: RESULT_PADDING_VERTICAL,
             result_multiline_vertical_padding:
                 RESULT_PADDING_VERTICAL + MULTILINE_RESULT_EXTRA_VERTICAL_PADDING,
-            // Figma "Palette Menu Item" applies an outer gutter so the highlight doesn't look full-bleed.
-            result_outer_horizontal_padding_fn: |appearance| 4.0 * appearance.monospace_ui_scalar(),
+            // Outer gutter so the highlight doesn't look full-bleed. Matches the popup's
+            // `padding_top`/`padding_bottom` (10pt, see `command_palette/view.rs`) so the
+            // selection highlight has equal breathing room from every popup edge — the rounded
+            // highlight corners on the first/last rows then read consistently rather than as
+            // clipped on the vertical sides.
+            result_outer_horizontal_padding_fn: |_| 10.0,
             item_highlight_corner_radius: CornerRadius::with_all(Radius::Pixels(4.)),
             ..Default::default()
         };

@@ -6,6 +6,7 @@ use fuzzy_match::match_indices_case_insensitive;
 use warpui::{AppContext, Entity, EntityId, SingletonEntity, WindowId};
 
 use crate::launch_configs::launch_config::LaunchConfig;
+use crate::search::command_palette::launch_config::renderer::DiffStats;
 use crate::search::command_palette::mixer::CommandPaletteItemAction;
 use crate::search::command_palette::projects::search_item::SearchItem;
 use crate::search::command_palette::separator_search_item::SeparatorSearchItem;
@@ -61,6 +62,9 @@ struct OpenRow {
     window_id: WindowId,
     path: Option<String>,
     branch: Option<String>,
+    /// Working-tree diff stats vs HEAD for the row's cwd, when it is a git repo. Cached at query
+    /// time alongside `branch` so the palette doesn't reach into libgit2 twice per row.
+    diff_stats: Option<DiffStats>,
     /// Project origin for the row's icon; `None` for plain (`cmd+n`) tabs.
     origin: Option<ProjectOrigin>,
     /// Basename of the parent directory (e.g. `work` for `~/work/api`), used to disambiguate the
@@ -101,13 +105,14 @@ impl SyncDataSource for DataSource {
                     .and_then(|i| i.path.clone())
                     .or_else(|| workspace_cwd(workspace_id, app));
                 let parent = cwd.as_deref().and_then(parent_basename);
-                let (path, branch) = path_details(cwd.as_deref());
+                let (path, branch, diff_stats) = path_details(cwd.as_deref());
                 Some(OpenRow {
                     name,
                     workspace_id,
                     window_id,
                     path,
                     branch,
+                    diff_stats,
                     origin: identity.map(|i| i.origin),
                     parent,
                 })
@@ -156,13 +161,14 @@ impl SyncDataSource for DataSource {
                     .and_then(|p| p.file_name())
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "window".to_string());
-                let (path, branch) = path_details(cwd.as_deref());
+                let (path, branch, diff_stats) = path_details(cwd.as_deref());
                 OpenRow {
                     name,
                     workspace_id: workspace.id(),
                     window_id,
                     path,
                     branch,
+                    diff_stats,
                     origin: None,
                     parent: None,
                 }
@@ -230,7 +236,7 @@ fn available_section(
     term: &str,
 ) -> Vec<QueryResult<CommandPaletteItemAction>> {
     let make = |config: &LaunchConfig, indices: Vec<usize>| {
-        let (path, branch) = path_details(config.primary_cwd());
+        let (path, branch, diff_stats) = path_details(config.primary_cwd());
         // A path-less config is a template; one with baked cwds is a project.
         let origin = if config.is_template() {
             ProjectOrigin::Template
@@ -243,6 +249,7 @@ fn available_section(
             0.0,
             path,
             branch,
+            diff_stats,
             origin,
         ))
     };
@@ -315,6 +322,7 @@ fn open_window_item(row: OpenRow, score: f64) -> QueryResult<CommandPaletteItemA
         score,
         row.path,
         row.branch,
+        row.diff_stats,
         row.origin,
     ))
 }
@@ -333,6 +341,7 @@ fn open_window_item_ref(
         0.0,
         row.path.clone(),
         row.branch.clone(),
+        row.diff_stats.clone(),
         row.origin,
     ))
 }
@@ -372,14 +381,14 @@ fn workspace_cwd(workspace_id: EntityId, app: &AppContext) -> Option<PathBuf> {
         .active_session_path(app)
 }
 
-/// Computes the home-relative path and current git branch for a working directory, for the palette
-/// detail line.
-fn path_details(cwd: Option<&Path>) -> (Option<String>, Option<String>) {
+/// Computes the home-relative path, current git branch, and working-tree diff stats for a working
+/// directory, for the palette detail line.
+fn path_details(cwd: Option<&Path>) -> (Option<String>, Option<String>, Option<DiffStats>) {
     let Some(cwd) = cwd else {
-        return (None, None);
+        return (None, None, None);
     };
     let path = Some(warp_core::paths::home_relative_path(cwd));
-    (path, current_branch(cwd))
+    (path, current_branch(cwd), current_diff_stats(cwd))
 }
 
 /// Returns the current git branch (or short commit for a detached HEAD) of the repo containing
@@ -389,6 +398,29 @@ fn current_branch(cwd: &Path) -> Option<String> {
     let repo = git2::Repository::discover(cwd).ok()?;
     let head = repo.head().ok()?;
     head.shorthand().map(str::to_owned)
+}
+
+/// Returns the working-tree diff stats vs HEAD (files changed, insertions, deletions) for the repo
+/// containing `cwd`. Returns `None` for a non-git path, an unborn HEAD, or a clean working tree —
+/// callers treat all three the same: hide the pill.
+fn current_diff_stats(cwd: &Path) -> Option<DiffStats> {
+    let repo = git2::Repository::discover(cwd).ok()?;
+    let head_tree = repo.head().ok()?.peel_to_tree().ok()?;
+    let diff = repo
+        .diff_tree_to_workdir_with_index(Some(&head_tree), None)
+        .ok()?;
+    let stats = diff.stats().ok()?;
+    let files = stats.files_changed() as u32;
+    let insertions = stats.insertions() as u32;
+    let deletions = stats.deletions() as u32;
+    if files == 0 && insertions == 0 && deletions == 0 {
+        return None;
+    }
+    Some(DiffStats {
+        files,
+        insertions,
+        deletions,
+    })
 }
 
 #[cfg(test)]
@@ -404,6 +436,7 @@ mod tests {
             window_id: WindowId::from_usize(1),
             path: None,
             branch: None,
+            diff_stats: None,
             origin: None,
             parent: parent.map(str::to_string),
         }

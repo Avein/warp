@@ -212,6 +212,12 @@ impl warpui::View for View {
                     .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
                     .with_border(Border::all(1.0).with_border_fill(theme.outline()))
                     .with_margin_top(117.)
+                    // Symmetric top/bottom padding around the body. Without `padding_top` the
+                    // first row's highlight touched the popup's top edge — visible in Alt-Tab
+                    // mode where there is no search bar above the body — and the rounded
+                    // highlight corners read as clipped. Matching the existing 10pt bottom keeps
+                    // the chrome symmetric and lets the first/last row's rounded corners breathe.
+                    .with_padding_top(10.)
                     .with_padding_bottom(10.)
                     .with_drop_shadow(*styles::DROP_SHADOW)
                     .finish(),
