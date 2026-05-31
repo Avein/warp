@@ -3570,6 +3570,12 @@ impl Workspace {
                 self.sync_panel_positions_from_config(ctx);
                 ctx.notify();
             }
+            // The bar itself is rendered by `RootView`, which reads `project_bar_visible` on each
+            // render. The notify here is just so the workspace re-renders alongside its parent;
+            // no workspace-local state depends on this flag.
+            TabSettingsChangedEvent::ProjectBarVisible { .. } => {
+                ctx.notify();
+            }
         }
     }
 
@@ -21968,6 +21974,16 @@ impl TypedActionView for Workspace {
             ToggleRightPanel => {
                 let pane_group_handle = self.active_tab_pane_group().clone();
                 self.toggle_right_panel(&pane_group_handle, ctx);
+            }
+            ToggleProjectBar => {
+                // Persist via TabSettings (writes `appearance.project_bar.visible` to settings.toml).
+                // The singleton update notifies observers, which includes RootView via
+                // `TabSettings::as_ref(app)` in `render`, so the bar appears/disappears immediately.
+                TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                    let new_value = !*settings.project_bar_visible.value();
+                    let _ = settings.project_bar_visible.set_value(new_value, ctx);
+                });
+                ctx.notify();
             }
             #[cfg(feature = "local_fs")]
             OpenCodeReviewPanel(locator) => {

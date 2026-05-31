@@ -16,6 +16,7 @@ mod lightbox_view;
 mod native_modal;
 mod one_time_modal_model;
 mod project_switcher;
+pub mod project_tab;
 mod registry;
 pub mod rewind_confirmation_dialog;
 pub mod sync_inputs;
@@ -739,6 +740,16 @@ pub fn init(app: &mut AppContext) {
         )
         .with_context_predicate(id!("Workspace"))
         .with_custom_action(CustomAction::ToggleWarpDrive),
+        // F3 is mac-only: linux/windows have it bound to "find next" (see view_components/find.rs).
+        // Persisted in `TabSettings::project_bar_visible`; handler in workspace/view.rs flips it
+        // and the singleton update re-renders RootView, which reads the setting in `render`.
+        EditableBinding::new(
+            "workspace:toggle_project_bar",
+            BindingDescription::new("Toggle Project Tabs Bar"),
+            WorkspaceAction::ToggleProjectBar,
+        )
+        .with_context_predicate(id!("Workspace"))
+        .with_mac_key_binding("f3"),
         EditableBinding::new(
             TOGGLE_RIGHT_PANEL_BINDING_NAME,
             BindingDescription::new("Toggle code review")
