@@ -260,8 +260,8 @@ pub enum WorkspaceAction {
     /// In Code Mode V2 this toggles the left panel which contains both the project explorer and
     /// Warp Drive. This happens as explicit action from the user.
     ToggleLeftPanel,
-    /// Toggles the visibility of the project-tab bar (rendered by `root_view.rs::render_project_bar`).
-    /// Reads/writes `TabSettings::project_bar_visible`, so the choice persists across restarts.
+    /// Toggles the project-tab bar (`workspace::view::Workspace::render_project_bar`) via
+    /// `TabSettings::project_bar_visible`. Persists across restarts.
     ToggleProjectBar,
     /// Toggles directly to the Warp Drive tab of the left panel in Code Mode V2
     ToggleWarpDrive,

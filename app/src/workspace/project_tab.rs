@@ -1,32 +1,18 @@
-//! Self-contained renderer for a single tab in the **project-tab bar**
-//! (`app/src/root_view.rs::render_project_bar`).
+//! Renderer for one tab in the project-tab bar
+//! ([`crate::workspace::view::Workspace::render_project_bar`]).
 //!
-//! This is *not* the session-tab renderer. Session tabs live in
-//! [`app/src/tab.rs::TabComponent`] and are tightly coupled to session models (indicators, rename
-//! editor, drag/drop targets, etc.). Project tabs need almost none of that complexity — just a
-//! leading origin icon, a label, an active highlight, and a close `×` on hover — so this is a
-//! dedicated, intentionally small component rather than a refactor of `TabComponent`.
-//!
-//! Visual decisions captured in `docs/projects-ui-polish.md` Step 3:
-//! - **Chrome is a literal mirror of `TabComponent` with `FeatureFlag::NewTabStyling` on**
-//!   ([`app/src/tab.rs::render_tab_container_internal`]):
-//!   - No corner radius — tabs are rectangular blocks that share the strip's top/bottom edges.
-//!   - Border only on the right (and on the left for the first tab) — the right border of tab N is
-//!     the visual separator between tab N and tab N+1, so adjacent tabs don't double up.
-//!   - Active background = `internal_colors::fg_overlay_2(theme)`, hover = `fg_overlay_1`,
-//!     inactive = no background. The strip itself is already painted with `fg_overlay_1`, so an
-//!     inactive tab reads as part of the strip and an active tab "lifts" by a single overlay step.
-//! - Each tab renders a leading [`Icon`] keyed off [`ProjectOrigin`] so saved-config / template /
-//!   default / root / plain-window projects are visually distinguishable at a glance. The icon is
-//!   project-specific affordance the session-tab strip doesn't need.
-//! - The close `×` only renders while the tab is hovered (cheap mouse-state gate) and dispatches
-//!   `root_view:close_project_workspace`, which already handles the "last tab in window → close
-//!   window" chain via [`crate::root_view::close_workspace`].
+//! Visually this mirrors the session-tab strip with `FeatureFlag::NewTabStyling` on
+//! ([`crate::tab::TabComponent::render_tab_container_internal`]): rectangular tabs, no corner
+//! radius, side-only borders (right always, left only on the first tab) so adjacent tabs share
+//! a single 1pt separator. The one departure: active background is a 15% accent tint, not the
+//! session strip's neutral `fg_overlay_2` — so the user can tell at a glance which strip they're
+//! acting on. A leading [`Icon`] keyed off [`ProjectOrigin`] gives the project type away, and a
+//! close `×` appears on hover and dispatches `root_view:close_project_workspace`.
 
 use warp_core::ui::theme::color::internal_colors;
 use warpui::elements::{
     Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Fill, Flex, Hoverable,
-    MainAxisSize, MouseStateHandle, ParentElement, Radius, Text,
+    MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius, Text,
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::platform::Cursor;
@@ -37,48 +23,39 @@ use crate::root_view::CloseWorkspaceArg;
 use crate::ui_components::icons::Icon;
 use crate::workspace::ProjectOrigin;
 
-/// 13pt — matches `ui_font_size`. Session tabs use the default UI font size; we do the same so
-/// the two strips read as one design language rather than a beefy project bar over a thinner
-/// session bar.
+/// 13pt — matches the default `ui_font_size` used by session tabs.
 pub const PROJECT_TAB_LABEL_FONT_SIZE: f32 = 13.;
 
-/// Per-tab data the component needs. Everything is by-value so the caller doesn't have to juggle
-/// lifetimes across the render loop.
+/// 15% accent opacity (38 / 255 ≈ 0.149) — loud enough to read as a "selected" pill, quiet
+/// enough not to overpower an active session tab below.
+const ACTIVE_BG_OPACITY: u8 = 38;
+
+/// Mouse state for one project tab. The `pill` handle drives the tab body's hover (and gates the
+/// close-`×` visibility); the `close` handle drives the inner `×` button's own hover tint.
+#[derive(Default, Clone)]
+pub struct ProjectTabMouseStates {
+    pub pill: MouseStateHandle,
+    pub close: MouseStateHandle,
+}
+
+/// Per-tab data, by-value so the render closures don't need lifetimes.
 pub struct ProjectTabComponent<'a> {
-    /// Display name (`identity.name`) shown to the right of the leading icon.
     pub label: String,
-    /// `None` for a plain `cmd+n` window; otherwise the project's origin, which picks the leading
-    /// icon. See `Self::leading_icon`.
     pub origin: Option<ProjectOrigin>,
-    /// True if this tab represents the workspace currently in focus. Drives the `fg_overlay_2`
-    /// background fill and Medium label weight.
     pub is_active: bool,
-    /// True for the **leftmost** tab in the bar. Session tabs do the same trick — only the first
-    /// tab gets a left border, so adjacent tabs share a single 1pt vertical separator instead of
-    /// drawing two (which would look thicker).
+    /// Leftmost tab in the bar. Only the first tab draws a left border, so adjacent tabs share a
+    /// single 1pt vertical separator (same trick session tabs use, see `tab.rs:1552-1558`).
     pub is_first: bool,
-    /// The workspace this tab targets. Activating clicks dispatch
-    /// `root_view:activate_project_tab` with this id; close `×` clicks dispatch
-    /// `root_view:close_project_workspace` with this + `window_id`.
     pub view_id: EntityId,
-    /// Host OS window of `view_id`, needed by [`CloseWorkspaceArg`]. The activate path doesn't
-    /// need it (the action handler resolves the window from the workspace).
     pub window_id: WindowId,
-    /// Hover/press state for the tab body — gates the close-`×` visibility and the hover
-    /// background, and is the `Hoverable`'s state handle.
     pub tab_mouse_state: MouseStateHandle,
-    /// Hover state for the inner `×` button — drives its own background tint on hover.
     pub close_mouse_state: MouseStateHandle,
-    /// Borrowed appearance — used for theme colors, font family, and icon rendering. Borrow lasts
-    /// only until [`Self::render`] returns the `Box<dyn Element>`; the closures inside don't
-    /// capture it.
     pub appearance: &'a Appearance,
 }
 
 impl<'a> ProjectTabComponent<'a> {
-    /// Maps a [`ProjectOrigin`] (or `None` for a plain window) to the leading glyph. Same mapping
-    /// `projects/search_item.rs::render_icon` already uses for the palette rows — the bar and the
-    /// palette stay visually consistent.
+    /// Same origin → glyph mapping as `projects/search_item.rs::render_icon`, so the bar and the
+    /// projects palette stay visually consistent.
     fn leading_icon(&self) -> Icon {
         match self.origin {
             Some(ProjectOrigin::Config) => Icon::Folder,
@@ -89,7 +66,6 @@ impl<'a> ProjectTabComponent<'a> {
         }
     }
 
-    /// Builds the tab element. Consumes `self` because the closures need to own the data.
     pub fn render(self) -> Box<dyn Element> {
         let theme = self.appearance.theme();
         let label_color = theme.foreground();
@@ -101,20 +77,22 @@ impl<'a> ProjectTabComponent<'a> {
         let view_id = self.view_id;
         let window_id = self.window_id;
 
-        // Active border picks up the same `fg_overlay_2` token the active background uses so the
-        // active tab's right-side separator reads slightly louder than its inactive neighbours'.
         let active_border_fill = internal_colors::fg_overlay_2(theme);
         let inactive_border_fill = internal_colors::fg_overlay_1(theme);
 
-        let tab_body = Hoverable::new(self.tab_mouse_state, {
+        Hoverable::new(self.tab_mouse_state, {
             let close_state = self.close_mouse_state;
             let label = self.label;
             move |state| {
+                // `MainAxisSize::Max` + `MainAxisAlignment::Center` centers the icon + label inside
+                // the tab's slot. Without Max the row collapses to intrinsic width and there's
+                // nothing to center within. Same pattern session tabs use
+                // (`tab.rs::render_tab_container_internal::full_tab_content`).
                 let mut inner = Flex::row()
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                    .with_main_axis_size(MainAxisSize::Min);
+                    .with_main_axis_alignment(MainAxisAlignment::Center)
+                    .with_main_axis_size(MainAxisSize::Max);
 
-                // Leading origin icon.
                 inner.add_child(
                     Container::new(
                         ConstrainedBox::new(
@@ -128,8 +106,6 @@ impl<'a> ProjectTabComponent<'a> {
                     .finish(),
                 );
 
-                // Label. Active uses Medium weight so it wins the visual hierarchy even before
-                // the `fg_overlay_2` fill registers.
                 let mut text = Text::new_inline(
                     label.clone(),
                     ui_font_family,
@@ -141,9 +117,8 @@ impl<'a> ProjectTabComponent<'a> {
                 }
                 inner.add_child(text.finish());
 
-                // Close `×` only while the tab is hovered. Its own click handler captures the
-                // event inside the X's bounds so it doesn't bubble to the tab-activate handler
-                // below.
+                // Close `×` only while the tab is hovered. Inner click handler stops the event
+                // inside the X's bounds so it doesn't bubble to the tab-activate handler below.
                 if state.is_hovered() {
                     let close_state = close_state.clone();
                     let close_btn = Hoverable::new(close_state, move |close_hover| {
@@ -176,21 +151,18 @@ impl<'a> ProjectTabComponent<'a> {
                     inner.add_child(Container::new(close_btn).with_margin_left(6.).finish());
                 }
 
-                // Background follows the session-tab `NewTabStyling` mapping exactly: active gets
-                // `fg_overlay_2`, hover gets `fg_overlay_1`, otherwise no background (the strip's
-                // own `fg_overlay_1` shows through).
+                // Active = 15% accent tint (the "selected" pill). Hover = `fg_overlay_1` lift.
+                // Inactive = no background (strip's own `fg_overlay_1` shows through).
                 let background = if is_active {
-                    internal_colors::fg_overlay_2(theme).into()
+                    theme.accent().with_opacity(ACTIVE_BG_OPACITY).into()
                 } else if state.is_hovered() {
                     internal_colors::fg_overlay_1(theme).into()
                 } else {
                     Fill::None
                 };
 
-                // Border sides match the session-tab trick (`tab.rs:1552-1558`): top/bottom always
-                // off (so the tab shares the strip's top/bottom edges), right always on (acts as
-                // the separator to the next tab), left only on the first tab (avoids drawing two
-                // 1pt lines between adjacent tabs).
+                // Sides: top/bottom off (tab shares strip's top/bottom edges), right always on
+                // (separator to next tab), left only on the first tab (no double 1pt lines).
                 let border_fill = if is_active {
                     active_border_fill
                 } else {
@@ -211,8 +183,6 @@ impl<'a> ProjectTabComponent<'a> {
         .on_click(move |ctx, _app, _v2f| {
             ctx.dispatch_action("root_view:activate_project_tab", view_id);
         })
-        .finish();
-
-        tab_body
+        .finish()
     }
 }

@@ -20,6 +20,7 @@ mod vertical_tabs;
 #[cfg(target_family = "wasm")]
 mod wasm_view;
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "local_fs")]
@@ -143,6 +144,7 @@ use super::util::{
     PaneViewLocator, TabMovement, TerminalSessionFallbackBehavior, WelcomeTipsViewState,
     WorkspaceMouseStates, WorkspaceState,
 };
+use super::project_tab::{ProjectTabComponent, ProjectTabMouseStates};
 use super::{
     util, ActiveSession, ProjectIdentity, ProjectOrigin, ProjectSwitcher, TabBarDropTargetData,
     TabBarLocation, WorkspaceRegistry,
@@ -1094,6 +1096,10 @@ pub struct Workspace {
     /// orchestration cards' "New API key…" flow. Cloud mode renders the
     /// FTUX view inline and does not use this.
     create_auth_secret_modal: Option<ViewHandle<Modal<AuthSecretFtuxView>>>,
+    /// Per-tab mouse state for the project-tab bar, keyed by workspace `EntityId`. Lazily
+    /// populated by [`Self::render_project_bar`] (hence `RefCell`, since `View::render` only gets
+    /// `&self`).
+    project_tab_mouse_states: RefCell<HashMap<EntityId, ProjectTabMouseStates>>,
 }
 
 impl Workspace {
@@ -3219,6 +3225,7 @@ impl Workspace {
                 Self::build_remove_tab_config_confirmation_dialog(ctx),
             handoff_environment_creation_modal: None,
             create_auth_secret_modal: None,
+            project_tab_mouse_states: RefCell::new(HashMap::new()),
         };
 
         ws.configure_new_workspace(workspace_setting, ctx);
@@ -3570,9 +3577,8 @@ impl Workspace {
                 self.sync_panel_positions_from_config(ctx);
                 ctx.notify();
             }
-            // The bar itself is rendered by `RootView`, which reads `project_bar_visible` on each
-            // render. The notify here is just so the workspace re-renders alongside its parent;
-            // no workspace-local state depends on this flag.
+            // `Workspace::render` reads `project_bar_visible` on each render to gate the project
+            // bar; this notify just kicks a re-render when the setting changes.
             TabSettingsChangedEvent::ProjectBarVisible { .. } => {
                 ctx.notify();
             }
@@ -19129,6 +19135,53 @@ impl Workspace {
         .finish()
     }
 
+    /// Project-tab bar — slots between [`Self::render_tab_bar`] (top header) and the panels row.
+    /// One tab per workspace registered for this window, expanded so N tabs evenly split the bar
+    /// width. Mirrors the session-tab strip's chrome (`fg_overlay_1` overlay + 1pt outline bottom
+    /// border) so the two read as one design language; active tab uses a 15% accent tint.
+    fn render_project_bar(&self, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
+        let registry = WorkspaceRegistry::as_ref(app);
+        let workspaces = registry.workspaces_for_window(self.window_id, app);
+        let active_id = registry.active_id(self.window_id);
+        let switcher = ProjectSwitcher::as_ref(app);
+        let mut states = self.project_tab_mouse_states.borrow_mut();
+
+        // `CrossAxisAlignment::Stretch` makes each tab fill the row's vertical extent so the
+        // active-tab accent fill paints corner-to-corner (not a floating pill).
+        let mut row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+        for (idx, workspace) in workspaces.iter().enumerate() {
+            let view_id = workspace.id();
+            let tab_states = states.entry(view_id).or_default().clone();
+            let identity = switcher.identity(view_id);
+            let component = ProjectTabComponent {
+                label: identity
+                    .map(|i| i.name.clone())
+                    .unwrap_or_else(|| "untitled".to_string()),
+                origin: identity.map(|i| i.origin),
+                is_active: Some(view_id) == active_id,
+                is_first: idx == 0,
+                view_id,
+                window_id: self.window_id,
+                tab_mouse_state: tab_states.pill,
+                close_mouse_state: tab_states.close,
+                appearance,
+            };
+            // `Expanded::new(1.0, …)` gives each tab an equal fraction of the row width.
+            row.add_child(Expanded::new(1.0, component.render()).finish());
+        }
+
+        let row = ConstrainedBox::new(row.finish())
+            .with_height(TAB_BAR_HEIGHT)
+            .finish();
+        let theme = appearance.theme();
+        Container::new(row)
+            .with_background(internal_colors::fg_overlay_1(theme))
+            .with_border(Border::bottom(1.).with_border_fill(theme.outline()))
+            .finish()
+    }
+
     // Render traffic lights, if appropriate for the current platform.
     fn maybe_render_traffic_lights(&self, stack: &mut Stack, app: &AppContext) {
         let Some(traffic_light_data) = traffic_light_data(app, self.window_id) else {
@@ -21977,8 +22030,8 @@ impl TypedActionView for Workspace {
             }
             ToggleProjectBar => {
                 // Persist via TabSettings (writes `appearance.project_bar.visible` to settings.toml).
-                // The singleton update notifies observers, which includes RootView via
-                // `TabSettings::as_ref(app)` in `render`, so the bar appears/disappears immediately.
+                // `TabSettingsChangedEvent::ProjectBarVisible` notifies the workspace, which re-renders
+                // and reads the flag again to show/hide the project bar.
                 TabSettings::handle(ctx).update(ctx, |settings, ctx| {
                     let new_value = !*settings.project_bar_visible.value();
                     let _ = settings.project_bar_visible.set_value(new_value, ctx);
@@ -23689,6 +23742,10 @@ impl View for Workspace {
             let mut outer_column = Flex::column();
             if tab_bar_mode == ShowTabBar::Stacked {
                 outer_column.add_child(self.render_tab_bar(self.tab_fixed_width, appearance, app));
+            }
+            // Project-tab bar between the top header and the panels row. F3 / TabSettings gates it.
+            if *TabSettings::as_ref(app).project_bar_visible {
+                outer_column.add_child(self.render_project_bar(appearance, app));
             }
             let content = self.render_banner_and_active_tab(app, appearance);
             let panels_row = self.render_panels(app, Shrinkable::new(1.0, content).finish(), false);

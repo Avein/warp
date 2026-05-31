@@ -537,10 +537,10 @@ define_settings_group!(TabSettings, settings: [
         toml_path: "appearance.vertical_tabs.show_details_on_hover",
         description: "Whether to show a details sidecar when hovering over a vertical tab.",
     },
-    // Show the project-tab bar above the session-tab strip (see `root_view.rs::render_project_bar`).
-    // Default on so a fresh install discovers the feature; F3 toggles it (mac-only — F3 is
-    // find-next on linux/windows). Synced globally so the user's choice rides their other appearance
-    // prefs across machines.
+    // Show the project-tab bar inside the workspace, between the top header bar and the panels
+    // row (see `workspace::view::Workspace::render_project_bar`). Default on so a fresh install
+    // discovers the feature; F3 toggles it (mac-only — F3 is find-next on linux/windows). Synced
+    // globally so the user's choice rides along with the rest of their appearance prefs.
     project_bar_visible: ProjectBarVisible {
         type: bool,
         default: true,
@@ -548,7 +548,7 @@ define_settings_group!(TabSettings, settings: [
         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
         private: false,
         toml_path: "appearance.project_bar.visible",
-        description: "Whether to show the project-tab bar above the session-tab strip.",
+        description: "Whether to show the project-tab bar inside the workspace.",
     },
     header_toolbar_chip_selection: HeaderToolbarChipSelection,
     new_tab_placement: NewTabPlacement,

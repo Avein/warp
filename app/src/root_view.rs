@@ -19,13 +19,11 @@ use session_sharing_protocol::common::SessionId;
 use settings::Setting as _;
 use url::Url;
 use warp_core::context_flag::ContextFlag;
-use warp_core::ui::theme::color::internal_colors;
 use warp_core::user_preferences::GetUserPreferences as _;
 use warp_graphql::billing::StripeSubscriptionPlan;
 use warpui::clipboard::ClipboardContent;
 use warpui::elements::{
-    Border, ChildAnchor, ConstrainedBox, Container, CrossAxisAlignment, Dismiss, Expanded, Flex,
-    MainAxisSize, MouseStateHandle, OffsetPositioning, ParentAnchor, ParentElement,
+    Border, ChildAnchor, Dismiss, OffsetPositioning, ParentAnchor, ParentElement,
     ParentOffsetBounds, Stack,
 };
 use warpui::keymap::{EditableBinding, FixedBinding};
@@ -98,15 +96,13 @@ use crate::uri::OpenMCPSettingsArgs;
 use crate::user_config::WarpConfig;
 use crate::util::bindings::{self, is_binding_pty_compliant};
 use crate::util::traffic_lights::{
-    traffic_light_data, TrafficLightData, TrafficLightMouseStates, TrafficLightSide,
+    traffic_light_data, TrafficLightData, TrafficLightMouseStates,
 };
 use crate::view_components::DismissibleToast;
 use crate::window_settings::WindowSettings;
 use crate::workspace::hoa_onboarding::mark_hoa_onboarding_completed;
-use crate::workspace::project_tab::ProjectTabComponent;
 use crate::workspace::tab_settings::TabSettings;
-use crate::workspace::util::get_terminal_background_fill;
-use crate::workspace::view::{OnboardingTutorial, TAB_BAR_HEIGHT};
+use crate::workspace::view::OnboardingTutorial;
 use crate::workspace::{
     ActiveSession, PaneViewLocator, ProjectIdentity, ProjectOrigin, ProjectSwitcher, Workspace,
     WorkspaceAction, WorkspaceRegistry,
@@ -237,15 +233,6 @@ pub struct FocusOrSpawnProjectArg {
     /// correctly across restarts. The palette derives this from the config (`Config` vs path-less
     /// `Template`); `newds` passes `Default`.
     pub origin: ProjectOrigin,
-}
-
-/// The two `MouseStateHandle`s a single project-tab pill needs to track separately: one for the
-/// whole pill (hover gates the close-X visibility; click activates the workspace) and one for the
-/// close-X button itself (hover paints its own background).
-#[derive(Default, Clone)]
-struct ProjectTabMouseStates {
-    pill: MouseStateHandle,
-    close: MouseStateHandle,
 }
 
 /// Argument for `root_view:close_project`: close the named project's window if it is open.
@@ -1905,12 +1892,6 @@ pub struct RootView {
     /// settings to apply after a new user login / initial cloud load completes
     pending_post_auth_onboarding_settings: Option<SelectedSettings>,
     paste_auth_token_modal: Option<ViewHandle<PasteAuthTokenModalView>>,
-    /// Per-project-tab hover/press state for the project bar, keyed by the workspace view id. Each
-    /// pill needs two independent mouse states: one for the pill itself (drives the activate click
-    /// and the "show close X on hover" gate) and one for the inner close button (drives the X's own
-    /// hover background). Lazily populated during render (hence the `RefCell`, since `render` takes
-    /// `&self`).
-    project_tab_mouse_states: RefCell<HashMap<EntityId, ProjectTabMouseStates>>,
     /// Strong handles to every project-tab workspace hosted in this window. The registry only holds
     /// weak handles, and `Terminal(handle)` only keeps the *active* one alive — so without this the
     /// previously-active workspace would be deallocated the moment we switch tabs. Tracked lazily in
@@ -2024,7 +2005,6 @@ impl RootView {
             pending_tutorial: None,
             pending_post_auth_onboarding_settings: None,
             paste_auth_token_modal: None,
-            project_tab_mouse_states: RefCell::new(HashMap::new()),
             project_workspaces: RefCell::new(Vec::new()),
             new_project_popup,
         };
@@ -3746,96 +3726,6 @@ impl RootView {
         }
     }
 
-    /// Renders the project-tab bar shown above the active workspace: one pill per project-tab in
-    /// this window, labelled with the project's name and the active one highlighted with a subtle
-    /// theme overlay (matching the session-tab visual tokens used by `tab.rs`). Each pill shows a
-    /// close `×` on hover whose click goes through `root_view:close_project_workspace` — the same
-    /// path the projects palette uses, which handles the "last tab in window → close window"
-    /// chain.
-    ///
-    /// Visibility is gated on [`TabSettings::project_bar_visible`] (F3 toggles it, persisted
-    /// globally); the bar always renders when on, even for a single-project window, so the chrome
-    /// stays stable when a 2nd tab opens.
-    fn render_project_bar(&self, active_id: EntityId, app: &AppContext) -> Box<dyn Element> {
-        let appearance = Appearance::as_ref(app);
-        let workspaces = WorkspaceRegistry::as_ref(app).workspaces_for_window(self.window_id, app);
-        let switcher = ProjectSwitcher::as_ref(app);
-        let mut states = self.project_tab_mouse_states.borrow_mut();
-
-        // Mirror `workspace::view::compute_tab_bar_left_padding`. macOS native traffic lights
-        // overlay the top-left of the window via a window-positioned overlay (rendered by the
-        // workspace below us, see `workspace/view.rs::maybe_render_traffic_lights`). To make
-        // room for the dots on the same row as the project tabs — exactly the way the session
-        // strip does — we reserve left padding equal to `traffic_light_width + 16pt gap`. Right
-        // side stays at the same modest 16pt the session strip uses.
-        let zoom_factor = WindowSettings::as_ref(app).zoom_level.as_zoom_factor();
-        let traffic_light_lead = traffic_light_data(app, self.window_id)
-            .filter(|data| data.side == TrafficLightSide::Left)
-            .map(|data| data.width(zoom_factor))
-            .unwrap_or(0.)
-            + 16.;
-        let right_inset = 16.;
-
-        // Use `MainAxisSize::Max` so the row claims the **full** strip width — that way the
-        // outer `Container`'s background paints edge-to-edge rather than shrinking to the tabs'
-        // intrinsic width and leaving a gap where the wallpaper bleeds through.
-        //
-        // `CrossAxisAlignment::Stretch` is the key piece making the tabs *look* like session
-        // tabs: it forces each tab to fill the row's vertical extent (top-to-bottom), so the
-        // active-tab `fg_overlay_2` fill paints corner-to-corner of the row instead of leaving
-        // the floating-pill look from the previous design.
-        let mut row = Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
-        for (idx, workspace) in workspaces.iter().enumerate() {
-            let view_id = workspace.id();
-            let tab_states = states.entry(view_id).or_default().clone();
-            let identity = switcher.identity(view_id);
-            let component = ProjectTabComponent {
-                label: identity
-                    .map(|i| i.name.clone())
-                    .unwrap_or_else(|| "untitled".to_string()),
-                origin: identity.map(|i| i.origin),
-                is_active: view_id == active_id,
-                is_first: idx == 0,
-                view_id,
-                window_id: self.window_id,
-                tab_mouse_state: tab_states.pill,
-                close_mouse_state: tab_states.close,
-                appearance,
-            };
-            // No per-tab margin — adjacent tabs share their 1pt vertical separator (right border
-            // of tab N = visual edge to tab N+1) the same way session tabs do.
-            row.add_child(component.render());
-        }
-
-        // `TAB_BAR_HEIGHT` (34pt) — identical to the session-tab strip below. The project bar is
-        // now a single horizontal row with traffic lights inset on the left and tabs flowing
-        // inline to the right of them, matching the user's reference screenshot of the session
-        // strip in horizontal mode. No more two-row stack with traffic-light zone on top.
-        let row = ConstrainedBox::new(row.finish())
-            .with_height(TAB_BAR_HEIGHT)
-            .finish();
-
-        // Mirror the session-tab strip's chrome exactly (`workspace/view.rs::render_tab_bar`):
-        //   • `internal_colors::fg_overlay_1(theme)` background (when `NewTabStyling` is on)
-        //   • 1pt bottom border in `theme.outline()`
-        // Both layered on top of the workspace's outer `get_terminal_background_fill`.
-        //
-        // Two nested containers: outer paints the opaque terminal-bg base (so the strip isn't
-        // translucent over the wallpaper through the window blur), inner adds the `fg_overlay_1`
-        // lift + outline-colored bottom border that visually anchors the strip.
-        let theme = Appearance::as_ref(app).theme();
-        let overlay = Container::new(row)
-            .with_padding_left(traffic_light_lead)
-            .with_padding_right(right_inset)
-            .with_background(internal_colors::fg_overlay_1(theme))
-            .with_border(Border::bottom(1.).with_border_fill(theme.outline()))
-            .finish();
-        Container::new(overlay)
-            .with_background(get_terminal_background_fill(self.window_id, app))
-            .finish()
-    }
 }
 
 impl View for RootView {
@@ -3901,22 +3791,11 @@ impl View for RootView {
                         tracked.push(workspace.clone());
                     }
                 }
-                // The project-tab bar is now always shown when the user keeps it on (default).
-                // Persisted in `TabSettings::project_bar_visible`; F3 toggles it. The bar reads
-                // as part of the title chrome (transparent, traffic-light insets), so it stays
-                // stable across 1-vs-N project-tab states rather than appearing/disappearing.
-                if *TabSettings::as_ref(app).project_bar_visible {
-                    let bar = self.render_project_bar(workspace.id(), app);
-                    let mut column = Flex::column().with_main_axis_size(MainAxisSize::Max);
-                    column.add_child(bar);
-                    column.add_child(Box::new(Expanded::new(
-                        1.0,
-                        ChildView::new(workspace).finish(),
-                    )));
-                    column.finish()
-                } else {
-                    ChildView::new(workspace).finish()
-                }
+                // The project-tab bar lives **inside** the workspace render (below the top
+                // header bar that holds the search bar / sidebar icons / Update button) — see
+                // [`crate::workspace::view::Workspace::render_project_bar`]. Gating on
+                // `TabSettings::project_bar_visible` happens there too.
+                ChildView::new(workspace).finish()
             }
         };
 

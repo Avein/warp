@@ -741,8 +741,8 @@ pub fn init(app: &mut AppContext) {
         .with_context_predicate(id!("Workspace"))
         .with_custom_action(CustomAction::ToggleWarpDrive),
         // F3 is mac-only: linux/windows have it bound to "find next" (see view_components/find.rs).
-        // Persisted in `TabSettings::project_bar_visible`; handler in workspace/view.rs flips it
-        // and the singleton update re-renders RootView, which reads the setting in `render`.
+        // Flips `TabSettings::project_bar_visible`; `Workspace::render` reads the setting and
+        // shows/hides the project-tab bar accordingly.
         EditableBinding::new(
             "workspace:toggle_project_bar",
             BindingDescription::new("Toggle Project Tabs Bar"),
