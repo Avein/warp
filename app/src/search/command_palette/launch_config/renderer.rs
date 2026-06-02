@@ -123,7 +123,8 @@ impl LaunchConfig {
                     .finish();
                     left_column.add_child(Align::new(path_text).left().finish());
                 }
-                let mut pills_row = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
+                let mut pills_row =
+                    Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
                 for pill in pills {
                     pills_row.add_child(pill);
                 }
@@ -142,7 +143,9 @@ impl LaunchConfig {
                 for pill in pills {
                     top_row.add_child(pill);
                 }
-                ConstrainedBox::new(top_row.finish()).with_height(40.).finish()
+                ConstrainedBox::new(top_row.finish())
+                    .with_height(40.)
+                    .finish()
             }
         }
     }
@@ -185,7 +188,7 @@ impl LaunchConfig {
         .with_width(icon_size)
         .with_height(icon_size)
         .finish();
-        let span = Span::new(str.into(), style.clone()).build().finish();
+        let span = Span::new(str.into(), style).build().finish();
         let body = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(Container::new(icon_el).with_margin_right(4.).finish())
@@ -211,11 +214,11 @@ impl LaunchConfig {
         let theme = appearance.theme();
         let green_style = UiComponentStyles {
             font_color: Some(theme.terminal_colors().normal.green.into()),
-            ..style.clone()
+            ..style
         };
         let red_style = UiComponentStyles {
             font_color: Some(theme.terminal_colors().normal.red.into()),
-            ..style.clone()
+            ..style
         };
 
         let icon_size = appearance.monospace_font_size();
@@ -235,26 +238,26 @@ impl LaunchConfig {
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(Container::new(icon_el).with_margin_right(4.).finish())
             .with_child(
-                Span::new(format!("{}", stats.files), style.clone())
+                Span::new(format!("{}", stats.files), style)
                     .build()
                     .finish(),
             );
         if stats.insertions > 0 || stats.deletions > 0 {
-            body.add_child(Span::new(" · ".to_string(), style.clone()).build().finish());
+            body.add_child(Span::new(" · ".to_string(), style).build().finish());
         }
         if stats.insertions > 0 {
             body.add_child(
-                Span::new(format!("+{}", stats.insertions), green_style.clone())
+                Span::new(format!("+{}", stats.insertions), green_style)
                     .build()
                     .finish(),
             );
         }
         if stats.insertions > 0 && stats.deletions > 0 {
-            body.add_child(Span::new(" ".to_string(), style.clone()).build().finish());
+            body.add_child(Span::new(" ".to_string(), style).build().finish());
         }
         if stats.deletions > 0 {
             body.add_child(
-                Span::new(format!("-{}", stats.deletions), red_style.clone())
+                Span::new(format!("-{}", stats.deletions), red_style)
                     .build()
                     .finish(),
             );
@@ -265,10 +268,7 @@ impl LaunchConfig {
     /// Wraps an arbitrary pill body in the standard pill chrome (border, padding, background,
     /// rounded corners, fixed height, outer margin). Factored out so the plain-text, icon+text,
     /// and diff-stats pills all share identical sizing — they read as one design language.
-    fn wrap_in_pill_chrome(
-        body: Box<dyn Element>,
-        style: &UiComponentStyles,
-    ) -> Box<dyn Element> {
+    fn wrap_in_pill_chrome(body: Box<dyn Element>, style: &UiComponentStyles) -> Box<dyn Element> {
         let mut container = Container::new(Align::new(body).finish());
         let mut border = Border::all(style.border_width.unwrap_or_default());
         if let Some(border_color) = style.border_color {
@@ -376,11 +376,7 @@ impl LaunchConfig {
         item_highlight_state: ItemHighlightState,
         font_size: f32,
     ) -> Text {
-        let text = Text::new_inline(
-            self.name.clone(),
-            appearance.ui_font_family(),
-            font_size,
-        );
+        let text = Text::new_inline(self.name.clone(), appearance.ui_font_family(), font_size);
 
         let bg_color = background_fill(item_highlight_state, appearance);
         text.with_color(appearance.theme().sub_text_color(bg_color).into_solid())

@@ -133,6 +133,7 @@ use super::hoa_onboarding::{
 use super::lightbox_view::{LightboxParams, LightboxView, LightboxViewEvent};
 use super::native_modal::{NativeModal, NativeModalEvent};
 use super::one_time_modal_model::OneTimeModalEvent;
+use super::project_tab::{ProjectTabComponent, ProjectTabMouseStates};
 use super::rewind_confirmation_dialog::{
     RewindConfirmationDialog, RewindConfirmationEvent, RewindDialogSource,
 };
@@ -144,7 +145,6 @@ use super::util::{
     PaneViewLocator, TabMovement, TerminalSessionFallbackBehavior, WelcomeTipsViewState,
     WorkspaceMouseStates, WorkspaceState,
 };
-use super::project_tab::{ProjectTabComponent, ProjectTabMouseStates};
 use super::{
     util, ActiveSession, ProjectIdentity, ProjectOrigin, ProjectSwitcher, TabBarDropTargetData,
     TabBarLocation, WorkspaceRegistry,

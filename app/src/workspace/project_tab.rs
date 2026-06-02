@@ -95,23 +95,18 @@ impl<'a> ProjectTabComponent<'a> {
 
                 inner.add_child(
                     Container::new(
-                        ConstrainedBox::new(
-                            icon_glyph.to_warpui_icon(label_color.into()).finish(),
-                        )
-                        .with_width(14.)
-                        .with_height(14.)
-                        .finish(),
+                        ConstrainedBox::new(icon_glyph.to_warpui_icon(label_color).finish())
+                            .with_width(14.)
+                            .with_height(14.)
+                            .finish(),
                     )
                     .with_margin_right(6.)
                     .finish(),
                 );
 
-                let mut text = Text::new_inline(
-                    label.clone(),
-                    ui_font_family,
-                    PROJECT_TAB_LABEL_FONT_SIZE,
-                )
-                .with_color(label_color.into());
+                let mut text =
+                    Text::new_inline(label.clone(), ui_font_family, PROJECT_TAB_LABEL_FONT_SIZE)
+                        .with_color(label_color.into());
                 if is_active {
                     text = text.with_style(Properties::default().weight(Weight::Medium));
                 }
@@ -123,12 +118,10 @@ impl<'a> ProjectTabComponent<'a> {
                     let close_state = close_state.clone();
                     let close_btn = Hoverable::new(close_state, move |close_hover| {
                         let mut wrap = Container::new(
-                            ConstrainedBox::new(
-                                Icon::X.to_warpui_icon(close_color.into()).finish(),
-                            )
-                            .with_width(14.)
-                            .with_height(14.)
-                            .finish(),
+                            ConstrainedBox::new(Icon::X.to_warpui_icon(close_color).finish())
+                                .with_width(14.)
+                                .with_height(14.)
+                                .finish(),
                         )
                         .with_uniform_padding(2.)
                         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(2.)));

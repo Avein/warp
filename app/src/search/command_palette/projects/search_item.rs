@@ -71,6 +71,7 @@ impl SearchItem {
 
     /// Builds an open project-tab row (open project or plain tab) targeting the workspace
     /// `workspace_id` hosted in `window_id`. `origin` is `None` for a plain tab.
+    #[allow(clippy::too_many_arguments)]
     pub fn open_window(
         name: String,
         workspace_id: EntityId,

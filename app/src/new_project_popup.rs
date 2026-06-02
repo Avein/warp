@@ -224,7 +224,10 @@ enum Completion {
     Replace(String),
     /// The stem is ambiguous with no shared-prefix progress; cycle through `candidates` (directory
     /// names) appended to `stem` on repeated Tab.
-    Cycle { stem: String, candidates: Vec<String> },
+    Cycle {
+        stem: String,
+        candidates: Vec<String>,
+    },
 }
 
 /// Returns the home directory as a path string (e.g. `/Users/alice`), used as the base for
@@ -425,7 +428,10 @@ mod tests {
 
     #[test]
     fn empty_matches_yield_no_completion() {
-        assert_eq!(build_completion("/src/", "zzz", names(&[])), Completion::None);
+        assert_eq!(
+            build_completion("/src/", "zzz", names(&[])),
+            Completion::None
+        );
     }
 
     #[test]
