@@ -220,15 +220,30 @@ from the original plan.
   `default N` sequence).
 
 ### Step 4 — Persisted project rename
-- New migration + `project_display_names` table — keys: `origin TEXT`, `canonical_path TEXT`, `name TEXT`, `updated_at TIMESTAMP`. `PRIMARY KEY (origin, canonical_path)`.
-- Files:
-  - `app/src/persistence/sqlite.rs` (+ tests)
-  - `crates/persistence/migrations/<new>/{up,down}.sql`
-  - `crates/persistence/{schema,model}.rs`
-  - `app/src/workspace/project_switcher.rs` — read-path consult
-  - `app/src/workspace/project_tab_pill.rs` — inline editor host
-  - `app/src/workspace/action.rs` + `app/src/workspace/mod.rs` — `RenameProjectTab` action + `F2` binding (scoped to `Workspace`, per the handoff macOS gotcha note)
-- **Done when:** rename via double-click and `F2` both work, persist across `warpfresh --build` restart, and a renamed project keeps its name when reopened from the palette later (proves identity-keyed persistence is wired through).
+
+> ⚠️ **Superseded by [`projects-rename.md`](./projects-rename.md)** — the fresh
+> PRD built ground-up after the origin simplification landed. The bullets
+> below are the May 2026 sketch; several decisions there (identity-scoped
+> persistence via a `project_display_names` table, `(origin, canonical_path)`
+> key) were re-grilled and **traded for a simpler per-tab override** (nullable
+> column on `windows`, dies with the workspace). See the new PRD for the
+> current spec.
+
+- **Original sketch (May 2026, partially stale):** new migration +
+  `project_display_names` table — keys: `origin TEXT`, `canonical_path TEXT`,
+  `name TEXT`, `updated_at TIMESTAMP`. `PRIMARY KEY (origin, canonical_path)`.
+  Files: `app/src/persistence/sqlite.rs`,
+  `crates/persistence/migrations/<new>/{up,down}.sql`,
+  `crates/persistence/{schema,model}.rs`,
+  `app/src/workspace/project_switcher.rs` (read-path consult),
+  `app/src/workspace/project_tab_pill.rs` (inline editor host),
+  `app/src/workspace/action.rs` + `app/src/workspace/mod.rs`
+  (`RenameProjectTab` action + `F2` binding).
+- **Current spec** ([`projects-rename.md`](./projects-rename.md)): per-tab
+  override via a nullable `display_name_override TEXT` column on `windows`;
+  read-path through `Workspace::display_name(...)`; F2 + double-click on the
+  active pill; surfaces include the bar pill, palette open-projects row, and
+  Alt+Tab row; palette fuzzy search matches both override and identity name.
 
 ### Step 5 — `git status` "first command" — dropped
 - User confirms this is on their side (shell prompt / dotfiles), not Warp.
