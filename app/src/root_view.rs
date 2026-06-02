@@ -312,6 +312,7 @@ pub fn init(app: &mut AppContext) {
     );
     app.add_global_action("root_view:open_launch_config", open_launch_config);
     app.add_global_action("root_view:focus_or_spawn_project", focus_or_spawn_project);
+    app.add_global_action("root_view:spawn_synthetic_root", spawn_synthetic_root);
     app.add_global_action("root_view:open_default_session", open_default_session);
     app.add_global_action("root_view:show_new_project_popup", show_new_project_popup);
     app.add_global_action("root_view:close_project", close_project);
@@ -787,6 +788,32 @@ fn close_workspace(workspace_id: EntityId, ctx: &mut AppContext) {
 /// Returns the user's home directory, falling back to the filesystem root if it can't be resolved.
 fn home_dir() -> PathBuf {
     PathBuf::from(shellexpand::tilde("~").into_owned())
+}
+
+/// Builds the synthetic-root launch config: a single plain-shell pane at the user's home directory,
+/// named `root`. Shared by the startup auto-spawn ([`spawn_synthetic_root`]) and the projects
+/// palette's Available row so both produce identical identity stamps via
+/// [`focus_or_spawn_project`]. Not backed by any `root.yaml` — root is purely runtime-synthetic.
+pub(crate) fn synthetic_root_config() -> launch_config::LaunchConfig {
+    launch_config::LaunchConfig::single_pane("root".to_string(), home_dir())
+}
+
+/// Spawns the synthetic-root project: a [`ProjectOrigin::Config`] tab named `root` at the user's
+/// home directory. Dispatched on app launch by [`crate::launch`] when persisted state contains
+/// zero windows — first launch, post-state-wipe, or after a session that left no windows behind.
+/// Routed through [`focus_or_spawn_project`] so a stale `root` stamp in the switcher focuses
+/// through rather than spawning a second copy, and so the palette's Available row uses an
+/// identical code path on user click.
+fn spawn_synthetic_root(_: &(), ctx: &mut AppContext) {
+    focus_or_spawn_project(
+        &FocusOrSpawnProjectArg {
+            launch_config: synthetic_root_config(),
+            origin: ProjectOrigin::Config {
+                config_name: "root".to_string(),
+            },
+        },
+        ctx,
+    );
 }
 
 /// Opens an ad-hoc project at `arg.path` (the `newds` command): applies the saved `default`

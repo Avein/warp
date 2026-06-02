@@ -2461,9 +2461,11 @@ fn launch(ctx: &mut warpui::AppContext, app_state: Option<AppState>, launch_mode
             }
 
             // If, after session restoration and command-line argument handling, we
-            // haven't opened any windows, open a new window.
+            // haven't opened any windows, spawn the synthetic-root project. Covers first launch,
+            // launches after the origin-simplification state wipe, and launches where the previous
+            // session left an empty persisted snapshot.
             if ctx.window_ids().count() == 0 {
-                ctx.dispatch_global_action("root_view:open_new", &());
+                ctx.dispatch_global_action("root_view:spawn_synthetic_root", &());
             }
 
             IntervalTimer::handle(ctx).update(ctx, |timer, _| {

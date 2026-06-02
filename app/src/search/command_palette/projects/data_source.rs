@@ -5,6 +5,7 @@ use fuzzy_match::match_indices_case_insensitive;
 use warpui::{AppContext, Entity, EntityId, SingletonEntity, WindowId};
 
 use crate::launch_configs::launch_config::LaunchConfig;
+use crate::root_view::synthetic_root_config;
 use crate::search::command_palette::launch_config::renderer::DiffStats;
 use crate::search::command_palette::mixer::CommandPaletteItemAction;
 use crate::search::command_palette::projects::search_item::SearchItem;
@@ -165,11 +166,25 @@ impl SyncDataSource for DataSource {
             .collect();
         open_windows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
-        // Available configs: every saved config whose project is not already open (matched by name).
+        // Available configs: every saved config whose project is not already open (matched by name),
+        // plus a synthetic `root` entry whenever no `Config { config_name: "root" }` tab is live —
+        // so the user can reopen root from the palette after closing it. The synthetic config lives
+        // for the duration of this query only; selecting it dispatches through the shared
+        // `focus_or_spawn_project` path with the same identity the startup auto-spawn would stamp.
+        let root_is_open = open_projects.iter().any(|row| {
+            matches!(
+                &row.origin,
+                Some(ProjectOrigin::Config { config_name }) if config_name == "root"
+            )
+        });
+        let synthetic_root = (!root_is_open).then(synthetic_root_config);
         let mut available: Vec<&LaunchConfig> = configs
             .iter()
             .filter(|config| !open_project_names.contains(&config.name))
             .collect();
+        if let Some(root) = synthetic_root.as_ref() {
+            available.push(root);
+        }
         available.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
         // Build the three sections, keeping their separators in both the empty-query and typed-query
