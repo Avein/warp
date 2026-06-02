@@ -21,6 +21,7 @@ mod registry;
 pub mod rewind_confirmation_dialog;
 pub mod sync_inputs;
 pub mod tab_settings;
+pub mod template_sequence;
 mod toast_stack;
 pub mod util;
 pub mod view;

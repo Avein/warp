@@ -95,9 +95,7 @@ use crate::themes::theme::{AnsiColorIdentifier, Blend, Fill, ThemeKind, WarpThem
 use crate::uri::OpenMCPSettingsArgs;
 use crate::user_config::WarpConfig;
 use crate::util::bindings::{self, is_binding_pty_compliant};
-use crate::util::traffic_lights::{
-    traffic_light_data, TrafficLightData, TrafficLightMouseStates,
-};
+use crate::util::traffic_lights::{traffic_light_data, TrafficLightData, TrafficLightMouseStates};
 use crate::view_components::DismissibleToast;
 use crate::window_settings::WindowSettings;
 use crate::workspace::hoa_onboarding::mark_hoa_onboarding_completed;
@@ -789,9 +787,9 @@ fn open_default_session(arg: &OpenPath, ctx: &mut AppContext) {
     );
 }
 
-/// Picks the next display name for a Default-origin project tab: `default` if no live Default tab
-/// uses that name, otherwise `default 1`, `default 2`, … — filling the first gap so closed tabs
-/// free their slot.
+/// Picks the next display name for a Default-origin project tab by delegating to
+/// [`crate::workspace::template_sequence`] with template name `default`. The result is
+/// `default-1`, `default-2`, … with gap-fill on close.
 fn next_default_name(ctx: &AppContext) -> String {
     let switcher = ProjectSwitcher::as_ref(ctx);
     let in_use: std::collections::HashSet<String> = switcher
@@ -801,17 +799,7 @@ fn next_default_name(ctx: &AppContext) -> String {
         .filter(|identity| identity.origin == ProjectOrigin::Default)
         .map(|identity| identity.name.clone())
         .collect();
-    if !in_use.contains("default") {
-        return "default".to_string();
-    }
-    let mut n = 1usize;
-    loop {
-        let candidate = format!("default {n}");
-        if !in_use.contains(&candidate) {
-            return candidate;
-        }
-        n += 1;
-    }
+    crate::workspace::template_sequence::next_template_sequence_name("default", &in_use)
 }
 
 /// Opens the new-project-tab path popup (`cmd-shift-n`) in the active window, prepopulated with that
@@ -3725,7 +3713,6 @@ impl RootView {
             }
         }
     }
-
 }
 
 impl View for RootView {
