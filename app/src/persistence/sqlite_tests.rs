@@ -352,15 +352,19 @@ fn test_sqlite_round_trips_project_identity() {
     set_uuid(&mut config_window, 10);
     config_window.project_identity = Some(ProjectIdentity {
         name: "dotfiles".to_string(),
-        path: Some(PathBuf::from("/Users/me/dotfiles")),
-        origin: ProjectOrigin::Config,
+        path: PathBuf::from("/Users/me/dotfiles"),
+        origin: ProjectOrigin::Config {
+            config_name: "dotfiles".to_string(),
+        },
     });
     let mut template_window = test_terminal_window_snapshot(true);
     set_uuid(&mut template_window, 11);
     template_window.project_identity = Some(ProjectIdentity {
-        name: "echo".to_string(),
-        path: Some(PathBuf::from("/Users/me/echo")),
-        origin: ProjectOrigin::Template,
+        name: "default-1".to_string(),
+        path: PathBuf::from("/Users/me/echo"),
+        origin: ProjectOrigin::Template {
+            template_name: "default".to_string(),
+        },
     });
     // A plain (`cmd+n`) window has no stamped identity.
     let mut plain_window = test_terminal_window_snapshot(false);
@@ -388,13 +392,17 @@ fn test_sqlite_round_trips_project_identity() {
         vec![
             Some(ProjectIdentity {
                 name: "dotfiles".to_string(),
-                path: Some(PathBuf::from("/Users/me/dotfiles")),
-                origin: ProjectOrigin::Config,
+                path: PathBuf::from("/Users/me/dotfiles"),
+                origin: ProjectOrigin::Config {
+                    config_name: "dotfiles".to_string(),
+                },
             }),
             Some(ProjectIdentity {
-                name: "echo".to_string(),
-                path: Some(PathBuf::from("/Users/me/echo")),
-                origin: ProjectOrigin::Template,
+                name: "default-1".to_string(),
+                path: PathBuf::from("/Users/me/echo"),
+                origin: ProjectOrigin::Template {
+                    template_name: "default".to_string(),
+                },
             }),
             None,
         ]

@@ -936,12 +936,18 @@ impl View {
                 );
             }
             CommandPaletteItemAction::FocusOrSpawnProject { config } => {
-                // A path-less config is a template opened at a path; one with baked cwds is a real
-                // project. This origin decides how the name is restored across restarts.
+                // A path-less config is a template opened at a path; one with baked cwds is a
+                // real project. The origin's tag carries the underlying name so dedupe can find
+                // the existing tab (`config_name` for configs, `(template_name, path)` for
+                // templates).
                 let origin = if config.is_template() {
-                    ProjectOrigin::Template
+                    ProjectOrigin::Template {
+                        template_name: config.name.clone(),
+                    }
                 } else {
-                    ProjectOrigin::Config
+                    ProjectOrigin::Config {
+                        config_name: config.name.clone(),
+                    }
                 };
                 ctx.dispatch_global_action(
                     "root_view:focus_or_spawn_project",

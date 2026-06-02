@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -33,10 +32,10 @@ pub enum Surface {
 /// [`ProjectSwitcher`] stamps + MRU) at query time, so the list always reflects which windows are
 /// open without needing to subscribe to events.
 ///
-/// A window is either a *project* (stamped with a [`crate::workspace::ProjectIdentity`] when opened
-/// via the palette / `newds` / root auto-registration) or a *plain* `cmd+n` window (unstamped).
-/// Saved launch configs that have no live project window are "available": a config with baked-in
-/// `cwd`s is a project, one without is a path-less template.
+/// A project-tab is either *stamped* (a [`crate::workspace::ProjectIdentity`] from the palette /
+/// `newds` / `cmd+shift+N` / synthetic-root auto-spawn) or *plain* `cmd+n` (unstamped). Saved
+/// launch configs that have no live stamped tab are "available": a config with baked-in `cwd`s is
+/// a project, one without is a path-less template.
 #[derive(Default)]
 pub struct DataSource {
     surface: Surface,
@@ -67,9 +66,6 @@ struct OpenRow {
     diff_stats: Option<DiffStats>,
     /// Project origin for the row's icon; `None` for plain (`cmd+n`) tabs.
     origin: Option<ProjectOrigin>,
-    /// Basename of the parent directory (e.g. `work` for `~/work/api`), used to disambiguate the
-    /// display label when two open projects share a basename. `None` for plain windows.
-    parent: Option<String>,
 }
 
 impl SyncDataSource for DataSource {
@@ -89,7 +85,7 @@ impl SyncDataSource for DataSource {
         let active_workspace = active_window.and_then(|id| registry.active_id(id));
 
         // Open project-tabs, MRU order (most recent first), each resolved to a display row.
-        let mut open_projects: Vec<OpenRow> = switcher
+        let open_projects: Vec<OpenRow> = switcher
             .projects_mru(app)
             .into_iter()
             .filter_map(|workspace_id| {
@@ -98,13 +94,12 @@ impl SyncDataSource for DataSource {
                 let name = identity
                     .map(|i| i.name.clone())
                     .unwrap_or_else(|| "project".to_string());
-                // Prefer the stamped path; fall back to this tab's own live cwd (root project, which
-                // has no stamped path). Read it from the workspace itself rather than the window's
-                // active session, so a background tab shows its own directory, not the active one's.
+                // Stamped path for projects; fall back to live cwd for plain tabs. Reads from the
+                // workspace itself rather than the window's active session, so a background tab
+                // shows its own directory, not the active one's.
                 let cwd = identity
-                    .and_then(|i| i.path.clone())
+                    .map(|i| i.path.clone())
                     .or_else(|| workspace_cwd(workspace_id, app));
-                let parent = cwd.as_deref().and_then(parent_basename);
                 let (path, branch, diff_stats) = path_details(cwd.as_deref());
                 Some(OpenRow {
                     name,
@@ -113,21 +108,16 @@ impl SyncDataSource for DataSource {
                     path,
                     branch,
                     diff_stats,
-                    origin: identity.map(|i| i.origin),
-                    parent,
+                    origin: identity.map(|i| i.origin.clone()),
                 })
             })
             .collect();
 
-        // Capture the raw (un-disambiguated) project names before relabelling, so the "Available"
-        // section still matches saved configs by their real name (e.g. `api`, not `api — work`).
+        // The "Available" section matches saved configs against open project display names. Since
+        // sequence-named templates (`default-1`, `simple_template-1`) and config names are kept
+        // distinct by construction, a plain set-difference is enough.
         let open_project_names: Vec<String> =
             open_projects.iter().map(|r| r.name.clone()).collect();
-
-        // Two open projects sharing a basename (`~/work/api`, `~/play/api`) get a parent-dir suffix
-        // so they're distinguishable in the list (`api — work` / `api — play`); a unique name stays
-        // bare. Applied to both the palette's Open Projects section and the Alt+Tab switcher.
-        disambiguate_names(&mut open_projects);
 
         // The Alt+Tab switcher lists open project-tabs, flat and MRU-ordered, with the *active*
         // project dropped — so the top item (selected at offset 0) is the most-recently-used other
@@ -170,7 +160,6 @@ impl SyncDataSource for DataSource {
                     branch,
                     diff_stats,
                     origin: None,
-                    parent: None,
                 }
             })
             .collect();
@@ -237,11 +226,16 @@ fn available_section(
 ) -> Vec<QueryResult<CommandPaletteItemAction>> {
     let make = |config: &LaunchConfig, indices: Vec<usize>| {
         let (path, branch, diff_stats) = path_details(config.primary_cwd());
-        // A path-less config is a template; one with baked cwds is a project.
+        // A path-less config is a template; one with baked cwds is a project. The origin's tag
+        // carries the underlying name so a later `focus_or_spawn_project` finds the existing tab.
         let origin = if config.is_template() {
-            ProjectOrigin::Template
+            ProjectOrigin::Template {
+                template_name: config.name.clone(),
+            }
         } else {
-            ProjectOrigin::Config
+            ProjectOrigin::Config {
+                config_name: config.name.clone(),
+            }
         };
         QueryResult::from(SearchItem::available(
             Arc::new(config.clone()),
@@ -342,34 +336,8 @@ fn open_window_item_ref(
         row.path.clone(),
         row.branch.clone(),
         row.diff_stats.clone(),
-        row.origin,
+        row.origin.clone(),
     ))
-}
-
-/// Relabels open-project rows whose basename collides: when two or more rows share a (case-folded)
-/// name, each that has a known parent directory gets a ` — <parent>` suffix (`api — work`); rows
-/// with a unique name are left untouched. A colliding row with no parent dir keeps its bare name.
-fn disambiguate_names(rows: &mut [OpenRow]) {
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for row in rows.iter() {
-        *counts.entry(row.name.to_lowercase()).or_default() += 1;
-    }
-    for row in rows.iter_mut() {
-        let collides = counts.get(&row.name.to_lowercase()).copied().unwrap_or(0) > 1;
-        if collides {
-            if let Some(parent) = &row.parent {
-                row.name = format!("{} — {}", row.name, parent);
-            }
-        }
-    }
-}
-
-/// Basename of `cwd`'s parent directory (e.g. `work` for `~/work/api`), used to disambiguate
-/// same-basename project labels. `None` when there is no parent component.
-fn parent_basename(cwd: &Path) -> Option<String> {
-    cwd.parent()?
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
 }
 
 /// The live working directory of a specific workspace's (project-tab's) active session, if local.
@@ -421,63 +389,4 @@ fn current_diff_stats(cwd: &Path) -> Option<DiffStats> {
         insertions,
         deletions,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use warpui::{EntityId, WindowId};
-
-    use super::*;
-
-    fn row(name: &str, parent: Option<&str>) -> OpenRow {
-        OpenRow {
-            name: name.to_string(),
-            workspace_id: EntityId::from_usize(1),
-            window_id: WindowId::from_usize(1),
-            path: None,
-            branch: None,
-            diff_stats: None,
-            origin: None,
-            parent: parent.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn parent_basename_of_nested_path() {
-        assert_eq!(
-            parent_basename(Path::new("/home/me/work/api")),
-            Some("work".to_string())
-        );
-        assert_eq!(parent_basename(Path::new("/")), None);
-    }
-
-    #[test]
-    fn colliding_names_get_parent_suffix() {
-        let mut rows = vec![
-            row("api", Some("work")),
-            row("api", Some("play")),
-            row("web", Some("work")),
-        ];
-        disambiguate_names(&mut rows);
-        assert_eq!(rows[0].name, "api — work");
-        assert_eq!(rows[1].name, "api — play");
-        // A unique name is left bare.
-        assert_eq!(rows[2].name, "web");
-    }
-
-    #[test]
-    fn collision_matches_case_insensitively() {
-        let mut rows = vec![row("Api", Some("work")), row("api", Some("play"))];
-        disambiguate_names(&mut rows);
-        assert_eq!(rows[0].name, "Api — work");
-        assert_eq!(rows[1].name, "api — play");
-    }
-
-    #[test]
-    fn colliding_row_without_parent_keeps_bare_name() {
-        let mut rows = vec![row("api", None), row("api", Some("play"))];
-        disambiguate_names(&mut rows);
-        assert_eq!(rows[0].name, "api");
-        assert_eq!(rows[1].name, "api — play");
-    }
 }

@@ -11,10 +11,8 @@ use crate::workspace::ProjectOrigin;
 /// `cmd+n`) tab and renders as the terminal glyph.
 pub fn icon_for_origin(origin: Option<&ProjectOrigin>) -> Icon {
     match origin {
-        Some(ProjectOrigin::Config) => Icon::Folder,
-        Some(ProjectOrigin::Template) => Icon::LayoutAlt01,
-        Some(ProjectOrigin::Default) => Icon::Navigation,
-        Some(ProjectOrigin::Root) => Icon::Gear,
+        Some(ProjectOrigin::Config { .. }) => Icon::Folder,
+        Some(ProjectOrigin::Template { .. }) => Icon::LayoutAlt01,
         None => Icon::Terminal,
     }
 }

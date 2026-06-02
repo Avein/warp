@@ -1,40 +1,43 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use warpui::{AppContext, Entity, EntityId, SingletonEntity};
 
 use super::WorkspaceRegistry;
 
-/// Where an open project came from. Persisted with the project, it decides how the project's
-/// display name is restored across a restart and which icon the palette shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Where an open project-tab came from. Persisted with the project; together with
+/// [`ProjectIdentity::path`] it forms the dedupe key (`config_name` alone for `Config`,
+/// `(template_name, path)` jointly for `Template`) and decides which icon the palette renders.
+///
+/// The two variants cover every entry point: a saved YAML with baked `cwd`s (`Config`), and a
+/// path-less YAML blueprint applied at a path on open (`Template`). Ad-hoc tabs from `newds` /
+/// `cmd+shift+N` are template-origin (`template_name = "default"`); the startup root tab is a
+/// synthetic config-origin (`config_name = "root"`, no `root.yaml`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProjectOrigin {
-    /// Opened from a saved launch config with baked-in `cwd`s (a real "Project", e.g. `dotfiles`).
-    /// Keeps its config name across restart even if the tab's working directory later changed.
-    Config,
-    /// Opened from a path-less *template* re-rooted at a path at launch time. Keeps the name it was
-    /// given when opened (the directory basename at that moment), not re-derived on restart.
-    Template,
-    /// A default/`newds` session not tied to a saved config. Its name follows the current working
-    /// directory, so it may be re-derived from the tab's cwd on restart.
-    Default,
-    /// The startup "root project" — the first project-tab of a session, auto-stamped as `~`. Kept
-    /// distinct from `Default` so the palette can give it its own icon.
-    Root,
+    /// Opened from a saved launch config (real or synthetic, like the startup `root`) with
+    /// baked-in `cwd`s. Deduped globally by `config_name` — reopening the same config focuses the
+    /// existing tab regardless of which window it lives in.
+    Config { config_name: String },
+    /// Opened from a path-less template applied at a path at launch time. Deduped globally by
+    /// `(template_name, path)` — opening the same template at the same path focuses the existing
+    /// tab; at a different path it spawns a new one.
+    Template { template_name: String },
 }
 
 /// Identity stamped on a project-tab (a [`super::Workspace`]) that represents an open *project* (as
 /// opposed to a plain `cmd+n` tab). Created when a project/template is opened via the projects
-/// palette, `newds`, or the startup "root project" auto-registration.
+/// palette, `newds`, or the startup synthetic-root auto-spawn.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectIdentity {
-    /// Display name (a launch-config name, a directory basename for `newds`, or the root project).
+    /// Display name. For `Config` origins this is the config name (e.g. `dotfiles`); for `Template`
+    /// origins it's the next slot in the template's `<template>-N` sequence (e.g. `default-1`).
     pub name: String,
-    /// The project's primary working directory, if known. `None` for the root project, whose path
-    /// is read live from the tab's active session instead.
-    pub path: Option<PathBuf>,
-    /// Where this project came from — decides the restore naming policy and palette icon.
+    /// The project's primary working directory. Always known: a `Config` carries its baked `cwd`,
+    /// a `Template` is applied at a path at open time, and the synthetic root is rooted at `~`.
+    pub path: PathBuf,
+    /// Where this project came from — see [`ProjectOrigin`] for the dedupe semantics.
     pub origin: ProjectOrigin,
 }
 
@@ -55,9 +58,6 @@ pub struct ProjectSwitcher {
     stamps: HashMap<EntityId, ProjectIdentity>,
     /// Project-tabs in most-recently-used order (front = most recent).
     mru: Vec<EntityId>,
-    /// Whether the startup "root project" tab has already been claimed. Ensures only the very first
-    /// workspace registered in a session is auto-stamped as the root project.
-    root_claimed: bool,
 }
 
 impl ProjectSwitcher {
@@ -94,6 +94,22 @@ impl ProjectSwitcher {
         self.workspace_for_name_filtered(name, |id| registry.is_workspace_live(id, app))
     }
 
+    /// Returns the live `Template`-origin project-tab currently open for `(template_name, path)`,
+    /// if any. The `Template` dedupe key is the pair — same template at a *different* path is not a
+    /// match; same template at the *same* path focuses the existing tab. `Config`-origin tabs are
+    /// ignored (they dedupe via [`Self::live_workspace_for_name`]).
+    pub fn live_workspace_for_template_at(
+        &self,
+        template_name: &str,
+        path: &Path,
+        app: &AppContext,
+    ) -> Option<EntityId> {
+        let registry = WorkspaceRegistry::as_ref(app);
+        self.workspace_for_template_at_filtered(template_name, path, |id| {
+            registry.is_workspace_live(id, app)
+        })
+    }
+
     /// Forgets any project association for `workspace_id` (for example after closing its tab).
     pub fn forget(&mut self, workspace_id: EntityId) {
         self.stamps.remove(&workspace_id);
@@ -105,17 +121,6 @@ impl ProjectSwitcher {
     pub fn projects_mru(&self, app: &AppContext) -> Vec<EntityId> {
         let registry = WorkspaceRegistry::as_ref(app);
         self.projects_mru_filtered(|id| registry.is_workspace_live(id, app))
-    }
-
-    /// Claims the startup root-project slot. Returns `true` exactly once per session (for the first
-    /// workspace registered), so the caller stamps it as the root project; subsequent calls return
-    /// `false`.
-    pub fn claim_root(&mut self) -> bool {
-        if self.root_claimed {
-            return false;
-        }
-        self.root_claimed = true;
-        true
     }
 
     /// Pure MRU ordering filtered by an injected liveness predicate (front = most recent). Split out
@@ -149,6 +154,26 @@ impl ProjectSwitcher {
             .find(|(id, identity)| identity.name == name && is_live(**id))
             .map(|(id, _)| *id)
     }
+
+    /// Pure `(template_name, path)` lookup filtered by an injected liveness predicate. Split out
+    /// from [`Self::live_workspace_for_template_at`] so it is unit-testable without an `AppContext`.
+    fn workspace_for_template_at_filtered(
+        &self,
+        template_name: &str,
+        path: &Path,
+        is_live: impl Fn(EntityId) -> bool,
+    ) -> Option<EntityId> {
+        self.stamps
+            .iter()
+            .find(|(id, identity)| {
+                matches!(
+                    &identity.origin,
+                    ProjectOrigin::Template { template_name: t } if t == template_name
+                ) && identity.path == path
+                    && is_live(**id)
+            })
+            .map(|(id, _)| *id)
+    }
 }
 
 impl Entity for ProjectSwitcher {
@@ -162,10 +187,14 @@ mod tests {
     use super::*;
 
     fn identity(name: &str) -> ProjectIdentity {
+        // Default test identity uses the synthetic `root` Config — it only has to be *some* valid
+        // origin/path pair; tests that exercise dedupe rules construct their own stamps directly.
         ProjectIdentity {
             name: name.to_string(),
-            path: None,
-            origin: ProjectOrigin::Default,
+            path: PathBuf::from("/tmp"),
+            origin: ProjectOrigin::Config {
+                config_name: name.to_string(),
+            },
         }
     }
 
@@ -263,10 +292,69 @@ mod tests {
     }
 
     #[test]
-    fn claim_root_succeeds_only_once() {
+    fn template_at_path_lookup_matches_jointly() {
         let mut switcher = ProjectSwitcher::default();
-        assert!(switcher.claim_root());
-        assert!(!switcher.claim_root());
-        assert!(!switcher.claim_root());
+        switcher.stamp(
+            id(1),
+            ProjectIdentity {
+                name: "default-1".to_string(),
+                path: PathBuf::from("/home/me/api"),
+                origin: ProjectOrigin::Template {
+                    template_name: "default".to_string(),
+                },
+            },
+        );
+        // Same template + same path → match.
+        assert_eq!(
+            switcher.workspace_for_template_at_filtered(
+                "default",
+                Path::new("/home/me/api"),
+                all_live
+            ),
+            Some(id(1))
+        );
+        // Same template, different path → no match.
+        assert_eq!(
+            switcher.workspace_for_template_at_filtered(
+                "default",
+                Path::new("/home/me/web"),
+                all_live
+            ),
+            None
+        );
+        // Different template, same path → no match.
+        assert_eq!(
+            switcher.workspace_for_template_at_filtered(
+                "simple_template",
+                Path::new("/home/me/api"),
+                all_live
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn template_at_path_lookup_ignores_config_origin() {
+        // A Config-origin stamp with the same string in `config_name` does not collide with the
+        // template lookup.
+        let mut switcher = ProjectSwitcher::default();
+        switcher.stamp(
+            id(1),
+            ProjectIdentity {
+                name: "default".to_string(),
+                path: PathBuf::from("/home/me/api"),
+                origin: ProjectOrigin::Config {
+                    config_name: "default".to_string(),
+                },
+            },
+        );
+        assert_eq!(
+            switcher.workspace_for_template_at_filtered(
+                "default",
+                Path::new("/home/me/api"),
+                all_live
+            ),
+            None
+        );
     }
 }

@@ -1,0 +1,4 @@
+-- No-op: the wipe in `up.sql` deletes rows whose persisted `ProjectIdentity`
+-- shape no longer matches the running code. Reversing the migration cannot
+-- recover those rows; leave the table empty for the previous binary to
+-- repopulate on its next save.

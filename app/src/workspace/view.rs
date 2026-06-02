@@ -146,8 +146,7 @@ use super::util::{
     WorkspaceMouseStates, WorkspaceState,
 };
 use super::{
-    util, ActiveSession, ProjectIdentity, ProjectOrigin, ProjectSwitcher, TabBarDropTargetData,
-    TabBarLocation, WorkspaceRegistry,
+    util, ActiveSession, ProjectSwitcher, TabBarDropTargetData, TabBarLocation, WorkspaceRegistry,
 };
 use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 use crate::ai::agent::api::ServerConversationToken;
@@ -3238,33 +3237,13 @@ impl Workspace {
         ws.sync_settings_error_state_into_settings_pane(ctx);
 
         let weak_handle = ctx.handle();
-        let workspace_id = weak_handle.id();
         WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
             registry.register(window_id, weak_handle);
         });
 
-        // Claim the very first *unstamped* project-tab of the session as the "root project" so it
-        // appears in the projects palette and Alt+Tab immediately, without a saved config. Restored
-        // tabs are already stamped above from their persisted cwd, so this only fires for a fresh
-        // empty start; the short-circuit keeps `claim_root` unconsumed until a genuinely unstamped
-        // tab is seen. Its path is read live from the active session (shown as `~` at home).
-        let already_stamped = ProjectSwitcher::as_ref(ctx).is_project(workspace_id);
-        if !already_stamped
-            && ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.claim_root())
-        {
-            ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| {
-                switcher.stamp(
-                    workspace_id,
-                    ProjectIdentity {
-                        name: "~".to_string(),
-                        path: None,
-                        // The startup root project — its own origin so the palette can icon it
-                        // distinctly from `newds`/default sessions.
-                        origin: ProjectOrigin::Root,
-                    },
-                );
-            });
-        }
+        // Synthetic-root auto-spawn lives at the app-state-load layer (see #05); this constructor
+        // stays origin-agnostic so a freshly-spawned workspace inherits its stamp from the caller
+        // (`focus_or_spawn_project` for projects, the loader for restored/synthetic root).
 
         ws
     }
@@ -3666,42 +3645,12 @@ impl Workspace {
 
                 // Project stamps live only in memory, so a restored window would otherwise come
                 // back as a plain window and vanish from the projects palette / Alt+Tab. Restore
-                // its identity from the persisted snapshot so it remains a project across restarts.
-                //
-                // Naming policy by origin: a `Config` (saved launch config) or `Template`
-                // (template-at-path) keeps its persisted name even if the tab has since been `cd`d
-                // elsewhere; a `Default`/`newds`/root session follows its current cwd, so its name
-                // is re-derived from the persisted active-tab directory. Sessions saved before
-                // identity was persisted have no stored identity and fall back to the cwd basename
-                // (as `Default`) so they still appear as projects.
-                let restored_cwd = window_snapshot
-                    .tabs
-                    .get(active_tab_index)
-                    .or_else(|| window_snapshot.tabs.first())
-                    .and_then(|tab| snapshot_first_cwd(&tab.root));
-                let cwd_basename = |cwd: &std::path::Path| {
-                    cwd.file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| cwd.to_string_lossy().into_owned())
-                };
-                let restored_identity = match window_snapshot.project_identity.clone() {
-                    Some(identity) => match identity.origin {
-                        ProjectOrigin::Default => restored_cwd.clone().map(|cwd| ProjectIdentity {
-                            name: cwd_basename(&cwd),
-                            path: Some(cwd),
-                            origin: ProjectOrigin::Default,
-                        }),
-                        ProjectOrigin::Config | ProjectOrigin::Template | ProjectOrigin::Root => {
-                            Some(identity)
-                        }
-                    },
-                    None => restored_cwd.clone().map(|cwd| ProjectIdentity {
-                        name: cwd_basename(&cwd),
-                        path: Some(cwd),
-                        origin: ProjectOrigin::Default,
-                    }),
-                };
-                if let Some(identity) = restored_identity {
+                // its identity from the persisted snapshot verbatim — both `Config` and `Template`
+                // keep their persisted name across restart, regardless of which directory the tab
+                // has since been `cd`d to. (Legacy `Default`/`Root`-origin records can't reach
+                // this code path: the origin-simplification wipe migration empties the windows
+                // table on the first launch after that change rolls out.)
+                if let Some(identity) = window_snapshot.project_identity.clone() {
                     let workspace_id = ctx.handle().id();
                     ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| {
                         switcher.stamp(workspace_id, identity);
@@ -19159,7 +19108,7 @@ impl Workspace {
                 label: identity
                     .map(|i| i.name.clone())
                     .unwrap_or_else(|| "untitled".to_string()),
-                origin: identity.map(|i| i.origin),
+                origin: identity.map(|i| i.origin.clone()),
                 is_active: Some(view_id) == active_id,
                 is_first: idx == 0,
                 view_id,
@@ -25606,21 +25555,6 @@ impl Workspace {
 
 fn should_reserve_traffic_light_space_in_tab_bar(side: TrafficLightSide) -> bool {
     side == TrafficLightSide::Right
-}
-
-/// Finds the first terminal pane's working directory in a saved pane tree, recursing into splits.
-/// Used to re-derive a restored window's project identity from its persisted session.
-fn snapshot_first_cwd(node: &PaneNodeSnapshot) -> Option<std::path::PathBuf> {
-    match node {
-        PaneNodeSnapshot::Leaf(leaf) => match &leaf.contents {
-            LeafContents::Terminal(terminal) => terminal.cwd.clone().map(std::path::PathBuf::from),
-            _ => None,
-        },
-        PaneNodeSnapshot::Branch(branch) => branch
-            .children
-            .iter()
-            .find_map(|(_, child)| snapshot_first_cwd(child)),
-    }
 }
 
 /// Returns every tab-bar-equivalent rect laid out in `window_id` (horizontal

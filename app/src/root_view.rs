@@ -223,13 +223,15 @@ pub struct OpenPath {
     pub path: PathBuf,
 }
 
-/// Argument for `root_view:focus_or_spawn_project`: focus the project's window if it is already
-/// open (singleton), otherwise spawn the launch config in a new window.
+/// Argument for `root_view:focus_or_spawn_project`: focus the existing tab if the project's
+/// dedupe key (`config_name` for [`ProjectOrigin::Config`], `(template_name, path)` for
+/// [`ProjectOrigin::Template`]) is already live, otherwise spawn it.
 pub struct FocusOrSpawnProjectArg {
     pub launch_config: launch_config::LaunchConfig,
-    /// Where the project came from — stamped on the window and persisted so its name is restored
-    /// correctly across restarts. The palette derives this from the config (`Config` vs path-less
-    /// `Template`); `newds` passes `Default`.
+    /// Where the project came from — stamped on the workspace and persisted so its identity is
+    /// restored across restarts. The palette derives this from the config (a baked-`cwd` config is
+    /// `Config`, a path-less template is `Template`); `newds` / `cmd+shift+N` pass
+    /// `Template { template_name: "default" }`.
     pub origin: ProjectOrigin,
 }
 
@@ -627,34 +629,80 @@ fn open_launch_config(arg: &OpenLaunchConfigArg, ctx: &mut AppContext) {
 /// window. Either way the resulting window is stamped so subsequent selections focus it.
 fn focus_or_spawn_project(arg: &FocusOrSpawnProjectArg, ctx: &mut AppContext) {
     let active_window = ctx.windows().active_window();
-
-    // Resolve a template (no baked cwd) to a concrete project at the active window's cwd.
     let mut launch_config = arg.launch_config.clone();
-    if launch_config.is_template() {
-        let path = active_window
-            .and_then(|id| {
-                ActiveSession::as_ref(ctx)
-                    .path_if_local(id)
+    let origin = arg.origin.clone();
+
+    // Resolve the target path by origin: a `Template` is path-less and lands at the active
+    // window's cwd (else home); a `Config` has its baked `cwd` already. Callers that pre-rewrite a
+    // template's cwds (e.g. `newds <path>`) pass it through here as a non-template launch config
+    // and we read the baked cwd directly.
+    let path = match &origin {
+        ProjectOrigin::Template { .. } => {
+            if launch_config.is_template() {
+                active_window
+                    .and_then(|id| {
+                        ActiveSession::as_ref(ctx)
+                            .path_if_local(id)
+                            .map(Path::to_path_buf)
+                    })
+                    .unwrap_or_else(home_dir)
+            } else {
+                launch_config
+                    .primary_cwd()
                     .map(Path::to_path_buf)
-            })
-            .unwrap_or_else(home_dir);
-        launch_config.rewrite_cwds(&path);
-        launch_config.name = directory_basename(&path);
-    }
-    let name = launch_config.name.clone();
-    let identity_path = launch_config.primary_cwd().map(Path::to_path_buf);
-    let origin = arg.origin;
-    let identity = ProjectIdentity {
-        name: name.clone(),
-        path: identity_path,
-        origin,
+                    .unwrap_or_else(home_dir)
+            }
+        }
+        ProjectOrigin::Config { .. } => launch_config
+            .primary_cwd()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(home_dir),
     };
 
-    // Already open: focus the project-tab (activate it in its host window) and mark it MRU.
-    if let Some(workspace_id) = ProjectSwitcher::as_ref(ctx).live_workspace_for_name(&name, ctx) {
+    // Already open: focus the existing tab instead of spawning a duplicate. `Config` dedupes by
+    // `config_name`, `Template` by `(template_name, path)` — same template at a different path
+    // spawns a fresh tab.
+    let already_open = match &origin {
+        ProjectOrigin::Template { template_name } => {
+            ProjectSwitcher::as_ref(ctx).live_workspace_for_template_at(template_name, &path, ctx)
+        }
+        ProjectOrigin::Config { config_name } => {
+            ProjectSwitcher::as_ref(ctx).live_workspace_for_name(config_name, ctx)
+        }
+    };
+    if let Some(workspace_id) = already_open {
         focus_workspace(workspace_id, ctx);
         return;
     }
+
+    // Allocate the display name. `Template` instances follow `<template>-N` with gap-fill;
+    // `Config` instances use the config's own name as-is.
+    let display_name = match &origin {
+        ProjectOrigin::Template { template_name } => {
+            let switcher = ProjectSwitcher::as_ref(ctx);
+            let in_use: std::collections::HashSet<String> = switcher
+                .projects_mru(ctx)
+                .iter()
+                .filter_map(|id| switcher.identity(*id))
+                .map(|identity| identity.name.clone())
+                .collect();
+            crate::workspace::template_sequence::next_template_sequence_name(template_name, &in_use)
+        }
+        ProjectOrigin::Config { .. } => launch_config.name.clone(),
+    };
+
+    // Path-less templates need their cwds rewritten so the rendered tab has a concrete shell cwd;
+    // configs already carry baked `cwd`s and need no rewrite.
+    if launch_config.is_template() {
+        launch_config.rewrite_cwds(&path);
+    }
+    launch_config.name = display_name.clone();
+
+    let identity = ProjectIdentity {
+        name: display_name,
+        path,
+        origin,
+    };
 
     // A config with no windows behaves like opening a fresh plain tab/window.
     if launch_config.windows.is_empty() {
@@ -741,65 +789,38 @@ fn home_dir() -> PathBuf {
     PathBuf::from(shellexpand::tilde("~").into_owned())
 }
 
-/// The basename of `path` (its final component), used to name ad-hoc / template-opened projects.
-fn directory_basename(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned())
-}
-
-/// Opens an ad-hoc project at `arg.path` (the `newds` command): re-roots the launch config named
-/// "default" to the given directory, names it after the directory's basename, and spawns it
-/// through [`focus_or_spawn_project`] so it joins the projects palette and Alt+Tab switcher. Falls
-/// back to a plain single shell at the path when no "default" config exists.
-///
-/// Routing through [`focus_or_spawn_project`] also gives ad-hoc projects singleton behavior keyed
-/// by basename: running `newds` again for an already-open directory focuses it instead of
-/// spawning a duplicate.
+/// Opens an ad-hoc project at `arg.path` (the `newds` command): applies the saved `default`
+/// template (or a synthetic single-shell fallback when the template isn't on disk) at the given
+/// path and dispatches through [`focus_or_spawn_project`]. The sequence name (`default-1`,
+/// `default-2`, …) and `(template_name, path)` dedupe are handled inside `focus_or_spawn_project`,
+/// so `newds <dir>` for an already-open path focuses the existing tab.
 fn open_default_session(arg: &OpenPath, ctx: &mut AppContext) {
     let path = arg.path.clone();
-    let name = next_default_name(ctx);
-
     let default_template = WarpConfig::as_ref(ctx)
         .launch_configs()
         .iter()
         .find(|config| config.name == "default")
         .cloned();
-
-    let mut launch_config = match default_template {
+    let launch_config = match default_template {
         Some(mut template) => {
             template.rewrite_cwds(&path);
             template
         }
-        None => LaunchConfig::single_pane(name.clone(), path),
+        // Synthetic fallback when no `default.yaml` exists: a single shell at the supplied path.
+        // The temporary name is overwritten by `focus_or_spawn_project` with the next slot in the
+        // `default-N` sequence.
+        None => LaunchConfig::single_pane("default".to_string(), path),
     };
-    launch_config.name = name;
 
-    // `newds` opens an ad-hoc Default-origin tab. Its display name is the next slot in the
-    // app-wide `default`/`default 1`/… sequence (via `next_default_name`); the path is shown
-    // separately as the row's subtitle in the projects palette.
     focus_or_spawn_project(
         &FocusOrSpawnProjectArg {
             launch_config,
-            origin: ProjectOrigin::Default,
+            origin: ProjectOrigin::Template {
+                template_name: "default".to_string(),
+            },
         },
         ctx,
     );
-}
-
-/// Picks the next display name for a Default-origin project tab by delegating to
-/// [`crate::workspace::template_sequence`] with template name `default`. The result is
-/// `default-1`, `default-2`, … with gap-fill on close.
-fn next_default_name(ctx: &AppContext) -> String {
-    let switcher = ProjectSwitcher::as_ref(ctx);
-    let in_use: std::collections::HashSet<String> = switcher
-        .projects_mru(ctx)
-        .iter()
-        .filter_map(|id| switcher.identity(*id))
-        .filter(|identity| identity.origin == ProjectOrigin::Default)
-        .map(|identity| identity.name.clone())
-        .collect();
-    crate::workspace::template_sequence::next_template_sequence_name("default", &in_use)
 }
 
 /// Opens the new-project-tab path popup (`cmd-shift-n`) in the active window, prepopulated with that
