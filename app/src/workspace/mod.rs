@@ -15,6 +15,7 @@ mod home;
 mod lightbox_view;
 mod native_modal;
 mod one_time_modal_model;
+pub mod project_icon;
 mod project_switcher;
 pub mod project_tab;
 mod registry;

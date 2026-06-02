@@ -21,6 +21,7 @@ use warpui::{Element, EntityId, WindowId};
 use crate::appearance::Appearance;
 use crate::root_view::CloseWorkspaceArg;
 use crate::ui_components::icons::Icon;
+use crate::workspace::project_icon::icon_for_origin;
 use crate::workspace::ProjectOrigin;
 
 /// 13pt — matches the default `ui_font_size` used by session tabs.
@@ -54,24 +55,12 @@ pub struct ProjectTabComponent<'a> {
 }
 
 impl<'a> ProjectTabComponent<'a> {
-    /// Same origin → glyph mapping as `projects/search_item.rs::render_icon`, so the bar and the
-    /// projects palette stay visually consistent.
-    fn leading_icon(&self) -> Icon {
-        match self.origin {
-            Some(ProjectOrigin::Config) => Icon::Folder,
-            Some(ProjectOrigin::Template) => Icon::LayoutAlt01,
-            Some(ProjectOrigin::Default) => Icon::Navigation,
-            Some(ProjectOrigin::Root) => Icon::Gear,
-            None => Icon::Terminal,
-        }
-    }
-
     pub fn render(self) -> Box<dyn Element> {
         let theme = self.appearance.theme();
         let label_color = theme.foreground();
         let close_color = theme.sub_text_color(theme.background());
         let ui_font_family = self.appearance.ui_font_family();
-        let icon_glyph = self.leading_icon();
+        let icon_glyph = icon_for_origin(self.origin.as_ref());
         let is_active = self.is_active;
         let is_first = self.is_first;
         let view_id = self.view_id;

@@ -9,7 +9,7 @@ use crate::search::command_palette::launch_config::renderer::{DiffStats, Project
 use crate::search::command_palette::mixer::CommandPaletteItemAction;
 use crate::search::command_palette::render_util::render_search_item_icon;
 use crate::search::result_renderer::ItemHighlightState;
-use crate::ui_components::icons::Icon;
+use crate::workspace::project_icon::icon_for_origin;
 use crate::workspace::ProjectOrigin;
 
 /// SearchItem for a row in the `projects:` palette / Alt+Tab switcher.
@@ -120,13 +120,7 @@ impl crate::search::item::SearchItem for SearchItem {
         // The icon distinguishes a project's origin: a saved project (baked cwds) from a template
         // (path-less, opened at a path) from a default/`newds` session — so two same-named entries
         // from different sources are visually distinct. Plain windows show a terminal glyph.
-        let icon = match self.origin {
-            Some(ProjectOrigin::Config) => Icon::Folder,
-            Some(ProjectOrigin::Template) => Icon::LayoutAlt01,
-            Some(ProjectOrigin::Default) => Icon::Navigation,
-            Some(ProjectOrigin::Root) => Icon::Gear,
-            None => Icon::Terminal,
-        };
+        let icon = icon_for_origin(self.origin.as_ref());
         render_search_item_icon(appearance, icon, color, highlight_state)
     }
 
