@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use warpui::{AppContext, Entity, EntityId, SingletonEntity};
 
+use super::identity_dedupe;
 use super::WorkspaceRegistry;
 
 /// Where an open project-tab came from. Persisted with the project; together with
@@ -87,17 +88,27 @@ impl ProjectSwitcher {
         self.stamps.contains_key(&workspace_id)
     }
 
-    /// Returns the live project-tab currently open for project `name`, if any. Used to enforce the
-    /// singleton: opening an already-open project focuses it instead of spawning a duplicate.
+    /// Returns the live `Config`-origin project-tab whose stamp's `config_name` is `name`. The
+    /// dedupe key for `Config` is the config name alone — a config opened at one cwd and then
+    /// `cd`d elsewhere still focuses through this lookup.
     pub fn live_workspace_for_name(&self, name: &str, app: &AppContext) -> Option<EntityId> {
         let registry = WorkspaceRegistry::as_ref(app);
-        self.workspace_for_name_filtered(name, |id| registry.is_workspace_live(id, app))
+        // Path is ignored for Config dedupe; the empty `PathBuf` is a stand-in for the unused
+        // field. `name` doubles as the dedupe-key string.
+        let needle = ProjectIdentity {
+            name: name.to_string(),
+            path: PathBuf::new(),
+            origin: ProjectOrigin::Config {
+                config_name: name.to_string(),
+            },
+        };
+        identity_dedupe::find_live_workspace(&needle, &self.stamps, |id| {
+            registry.is_workspace_live(id, app)
+        })
     }
 
-    /// Returns the live `Template`-origin project-tab currently open for `(template_name, path)`,
-    /// if any. The `Template` dedupe key is the pair — same template at a *different* path is not a
-    /// match; same template at the *same* path focuses the existing tab. `Config`-origin tabs are
-    /// ignored (they dedupe via [`Self::live_workspace_for_name`]).
+    /// Returns the live `Template`-origin project-tab whose stamp's `(template_name, path)` pair
+    /// matches the arguments. Same template at a *different* path is not a match.
     pub fn live_workspace_for_template_at(
         &self,
         template_name: &str,
@@ -105,7 +116,14 @@ impl ProjectSwitcher {
         app: &AppContext,
     ) -> Option<EntityId> {
         let registry = WorkspaceRegistry::as_ref(app);
-        self.workspace_for_template_at_filtered(template_name, path, |id| {
+        let needle = ProjectIdentity {
+            name: String::new(),
+            path: path.to_path_buf(),
+            origin: ProjectOrigin::Template {
+                template_name: template_name.to_string(),
+            },
+        };
+        identity_dedupe::find_live_workspace(&needle, &self.stamps, |id| {
             registry.is_workspace_live(id, app)
         })
     }
@@ -140,39 +158,6 @@ impl ProjectSwitcher {
             }
         }
         ordered
-    }
-
-    /// Pure name lookup filtered by an injected liveness predicate. Split out from
-    /// [`Self::live_workspace_for_name`] so it is unit-testable without an `AppContext`.
-    fn workspace_for_name_filtered(
-        &self,
-        name: &str,
-        is_live: impl Fn(EntityId) -> bool,
-    ) -> Option<EntityId> {
-        self.stamps
-            .iter()
-            .find(|(id, identity)| identity.name == name && is_live(**id))
-            .map(|(id, _)| *id)
-    }
-
-    /// Pure `(template_name, path)` lookup filtered by an injected liveness predicate. Split out
-    /// from [`Self::live_workspace_for_template_at`] so it is unit-testable without an `AppContext`.
-    fn workspace_for_template_at_filtered(
-        &self,
-        template_name: &str,
-        path: &Path,
-        is_live: impl Fn(EntityId) -> bool,
-    ) -> Option<EntityId> {
-        self.stamps
-            .iter()
-            .find(|(id, identity)| {
-                matches!(
-                    &identity.origin,
-                    ProjectOrigin::Template { template_name: t } if t == template_name
-                ) && identity.path == path
-                    && is_live(**id)
-            })
-            .map(|(id, _)| *id)
     }
 }
 
@@ -271,90 +256,7 @@ mod tests {
         assert_eq!(switcher.projects_mru_filtered(all_live), vec![id(1)]);
     }
 
-    #[test]
-    fn workspace_for_name_matches_live_stamped_tab() {
-        let mut switcher = ProjectSwitcher::default();
-        switcher.stamp(id(1), identity("dotfiles"));
-
-        assert_eq!(
-            switcher.workspace_for_name_filtered("dotfiles", all_live),
-            Some(id(1))
-        );
-        assert_eq!(
-            switcher.workspace_for_name_filtered("missing", all_live),
-            None
-        );
-        // A dead tab of that name does not count.
-        assert_eq!(
-            switcher.workspace_for_name_filtered("dotfiles", |_| false),
-            None
-        );
-    }
-
-    #[test]
-    fn template_at_path_lookup_matches_jointly() {
-        let mut switcher = ProjectSwitcher::default();
-        switcher.stamp(
-            id(1),
-            ProjectIdentity {
-                name: "default-1".to_string(),
-                path: PathBuf::from("/home/me/api"),
-                origin: ProjectOrigin::Template {
-                    template_name: "default".to_string(),
-                },
-            },
-        );
-        // Same template + same path → match.
-        assert_eq!(
-            switcher.workspace_for_template_at_filtered(
-                "default",
-                Path::new("/home/me/api"),
-                all_live
-            ),
-            Some(id(1))
-        );
-        // Same template, different path → no match.
-        assert_eq!(
-            switcher.workspace_for_template_at_filtered(
-                "default",
-                Path::new("/home/me/web"),
-                all_live
-            ),
-            None
-        );
-        // Different template, same path → no match.
-        assert_eq!(
-            switcher.workspace_for_template_at_filtered(
-                "simple_template",
-                Path::new("/home/me/api"),
-                all_live
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn template_at_path_lookup_ignores_config_origin() {
-        // A Config-origin stamp with the same string in `config_name` does not collide with the
-        // template lookup.
-        let mut switcher = ProjectSwitcher::default();
-        switcher.stamp(
-            id(1),
-            ProjectIdentity {
-                name: "default".to_string(),
-                path: PathBuf::from("/home/me/api"),
-                origin: ProjectOrigin::Config {
-                    config_name: "default".to_string(),
-                },
-            },
-        );
-        assert_eq!(
-            switcher.workspace_for_template_at_filtered(
-                "default",
-                Path::new("/home/me/api"),
-                all_live
-            ),
-            None
-        );
-    }
+    // Lookup-by-name and (template_name, path) dedupe rules are covered as pure-function tests in
+    // `super::identity_dedupe::tests`; the wrappers on `ProjectSwitcher` only stitch the registry
+    // in for liveness and need no further unit coverage here.
 }
