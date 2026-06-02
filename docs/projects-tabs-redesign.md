@@ -40,13 +40,17 @@ OS Window  →  RootView  →  [ Workspace … ]  (one active)  →  session tab
 
 ### Every project-tab is a project
 
-There is **no "plain workspace"** concept. Every Workspace is a project, classified by `origin`
-(carried over from the current code): `Config` · `Template` · `Default` (ad-hoc / `newds`) · `Root`
-(startup). The previous `plain window` origin and the palette's "Open Windows" section are
-**removed**; the palette collapses to **two sections: Open / Available**.
+There is **no "plain workspace"** concept. Every Workspace is a project, classified by `origin`:
+`Config { config_name }` (saved launch config with baked `cwd`s — covers the synthetic startup
+`root`) · `Template { template_name }` (path-less config applied at a path at open time — covers
+`newds`, the `cmd-shift-N` popup, and `cmd-n`'s starting tab via the built-in `default` template).
 
-A fresh project-tab with no saved config is an **ad-hoc project** (`origin = Default`), stamped at
-creation from the path it opens at.
+The 4-variant origin enum (`Config` · `Template` · `Default` · `Root`) was collapsed to these two
+in 2026-06; see [`projects-origin-simplification.md`](./projects-origin-simplification.md) for the
+PRD and the dedupe rules.
+
+A fresh project-tab with no saved config is an **ad-hoc project** — `Template { template_name:
+"default" }` applied at the open path, named `default-N` (next free slot, gap-filled on close).
 
 ### Project ↔ Workspace cardinality
 
@@ -112,13 +116,16 @@ project-tab for the same name+path is focused instead.
 - **Hide toggle** (mirrors the vertical-tabs-panel toggle) + per-window open state.
 - Both-vertical edge case (project bar + session panel both on a side): allow, but **force opposite
   sides**; if both point at the same side, the project bar wins it and the session panel falls back.
-- Per-`origin` icons carry over: `Folder` (Config) · `LayoutAlt01` (Template) · `Navigation`
-  (Default) · `Gear` (Root).
+- Per-`origin` icons (post-simplification): `Folder` (Config, including the synthetic `root`) ·
+  `LayoutAlt01` (Template). Mapping lives in `workspace::project_icon` and is shared by the project
+  bar and the projects palette.
 
 ## Switcher / MRU
 
 - `ProjectSwitcher` is **re-keyed from `WindowId` to a workspace/project id** (a per-Workspace
-  handle). Stamps, MRU, `claim_root`, liveness-against-registry all carry over, re-pointed.
+  handle). Stamps, MRU, liveness-against-registry all carry over, re-pointed. (The original
+  `claim_root` hook was removed by the origin-simplification work — root is now auto-spawned from
+  `launch()` when persisted state is empty.)
 - **MRU is global** across all workspaces in all OS windows (so the palette spans everything).
 - **Alt+Tab uses the within-window slice** of that MRU; the **palette is the global switcher**.
 
@@ -143,9 +150,13 @@ project-tab for the same name+path is focused instead.
 
 ## Root project
 
-- The startup window's first workspace **auto-stamps as the root project** (`origin = Root`,
-  name/path from its live cwd, `claim_root` once per session) so the list is populated from boot.
-  Re-pointed to the first *workspace* rather than the first *window*.
+- The startup workspace is **runtime-synthetic**, not loaded from any `root.yaml`. When persisted
+  state contains zero windows (first launch, after the origin-simplification state wipe, or after a
+  session that left no windows), `launch()` dispatches `root_view:spawn_synthetic_root`, which
+  opens a `Config { config_name: "root" }` workspace at `~` via the same
+  `focus_or_spawn_project` path the palette uses.
+- Reopenable from the palette's Available section after close. Originally `origin = Root` /
+  `claim_root` — both replaced by the simplification work.
 
 ## Persistence (in MVP)
 
@@ -168,8 +179,10 @@ free fallback):
   today's behavior; nothing pre-existing breaks.
 - Extend `test_sqlite_round_trips_project_identity` to assert group/order/active round-trip.
 
-Identity restore naming policy (carried over): Config/Template/Root keep the persisted name even if
-the tab `cwd` changed; Default re-derives from the current cwd basename.
+Identity restore naming policy: every restored stamp keeps its persisted name verbatim — the
+old Default-only "re-derive from cwd basename" branch was deleted by the origin-simplification
+work along with the `Default` and `Root` variants. (Templates now carry their `default-N` sequence
+name from open through restart unchanged.)
 
 ## What carries over vs. what is reworked
 
@@ -187,6 +200,14 @@ the tab `cwd` changed; Default re-derives from the current cwd basename.
 > Snapshot of what is actually on `feat/projects-palette` as of 2026-05-26, and the deliberate
 > divergences from the design above. Verified by `cargo check`/`cargo test --no-run` (green) and by
 > manual quit/relaunch testing.
+>
+> **Origin model update (2026-06):** the `ProjectOrigin` enum was subsequently collapsed from 4
+> variants (`Config` · `Template` · `Default` · `Root`) to 2 (`Config { config_name }` ·
+> `Template { template_name }`). The PRD is
+> [`projects-origin-simplification.md`](./projects-origin-simplification.md). This section reads
+> mostly as written — the per-phase plumbing is unchanged — but specific mentions of `Default`,
+> `Root`, `claim_root`, `disambiguate_names`, and the `next_default_name` helper below describe
+> code paths that have since been deleted; cross-referenced inline where each appears.
 
 ### Done and verified
 
@@ -199,8 +220,11 @@ the tab `cwd` changed; Default re-derives from the current cwd basename.
   input kept targeting the previous (hidden) workspace and shortcuts looked dead. This was the main
   "can't use any shortcut" bug.
 - **`ProjectSwitcher` re-keyed `WindowId` → workspace `EntityId`** (`project_switcher.rs`). MRU /
-  stamp / `claim_root` / liveness re-pointed; ordering + name lookup split into pure helpers
-  (`projects_mru_filtered`, `workspace_for_name_filtered`) with **7 unit tests**.
+  stamp / liveness re-pointed; ordering split into the pure helper `projects_mru_filtered` with
+  unit tests. *(Update 2026-06: the `claim_root` hook and the `workspace_for_name_filtered` helper
+  were removed by the origin simplification — root now auto-spawns from `launch()` instead, and the
+  per-origin dedupe rule lives in `workspace::identity_dedupe::find_live_workspace` with its own 7
+  unit tests.)*
 - **`WorkspaceRegistry`** (`registry.rs`) holds N workspaces/window (active id tracked) and gained
   `window_for_workspace` / `is_workspace_live` reverse lookups.
 - **Palette + Alt-Tab are workspace-keyed.** `projects/data_source.rs` enumerates workspaces
@@ -260,11 +284,11 @@ the tab `cwd` changed; Default re-derives from the current cwd basename.
     (uppercase — the keymap validator rejects shift+lowercase) / `.with_linux_or_windows_key_binding("ctrl-alt-n")`,
     scoped to `id!("Workspace")`, dispatching `WorkspaceAction::NewProjectTab` →
     `root_view:show_new_project_popup`. `CustomAction::NewProjectTab` now owns no default keystroke.
-- **Same-basename disambiguation** (`data_source.rs::disambiguate_names`): when two open project-tabs
-  share a basename, each gets a ` — <parent-dir>` suffix (`api — work` / `api — play`); unique names
-  stay bare. Applied to the palette's Open Projects section and the Alt+Tab switcher. The raw names
-  are captured first so the "Available" filter still matches saved configs by their real name. Covered
-  by 4 unit tests.
+- **Same-basename disambiguation** (`data_source.rs::disambiguate_names`): originally appended
+  ` — <parent-dir>` suffixes when two open project-tabs shared a basename (`api — work` / `api —
+  play`). *(Deleted by the origin simplification: ad-hoc tabs now carry globally-unique
+  `default-N` sequence names instead of cwd basenames, so the collision that motivated the
+  disambiguator no longer occurs. See `template_sequence::next_template_sequence_name`.)*
 
 ### Not yet implemented
 

@@ -233,6 +233,34 @@ These were the forks in the road — recording them so the next agent doesn't re
 
 ---
 
+## Origin simplification (2026-06)
+
+After the projects-as-tabs work landed, the `ProjectOrigin` enum was collapsed from 4 variants
+(`Config` · `Template` · `Default` · `Root`) down to **2**:
+
+- `Config { config_name }` — saved launch config with baked `cwd`s, including the runtime-synthetic
+  startup `root` (no `root.yaml` on disk). Dedupe key: `config_name` alone.
+- `Template { template_name }` — path-less config applied at a path at open time, covers
+  `cmd-shift-N`, `newds`, the `default` template behind `cmd-n`, and any user-saved templates.
+  Dedupe key: `(template_name, path)`. Display name follows a global `<template>-N` sequence
+  (`default-1`, `default-2`, `simple_template-1`, …) with gap-fill on close.
+
+Source of truth: [`projects-origin-simplification.md`](./projects-origin-simplification.md) (PRD)
+plus the six issue files under [`issues/projects-origin-0[1-6]-*.md`](./issues/). The work shipped
+as six commits on `feat/projects-palette` between `99472eea` and `9873f533`. A SQLite migration
+(`2026-06-02-000000_wipe_windows_for_origin_simplification`) wipes the `windows` table on first
+launch after rollout, so no in-the-wild legacy origin records survive. Notable consequences for
+later work:
+
+- `ProjectSwitcher::claim_root` and `disambiguate_names` are gone. Root auto-spawn lives in
+  `root_view::spawn_synthetic_root` (dispatched from `launch()` on empty state); per-origin dedupe
+  lives in `workspace::identity_dedupe::find_live_workspace`.
+- `ProjectIdentity::path` is non-`Option` everywhere — both variants always carry a concrete path.
+- Icon mapping is centralised in `workspace::project_icon` (`Folder` for `Config`, `LayoutAlt01`
+  for `Template`); both the project bar and the palette read it from there.
+
+---
+
 ## Process notes
 
 - Global rules in effect: think before coding, surgical changes only, never run destructive git

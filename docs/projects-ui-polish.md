@@ -29,7 +29,7 @@ This doc records the decisions, not the implementation. Files listed are the exp
 | Q2 | **Project-bar layout** | Originally: bar in the title-bar row above the session-tab bar. **Pivoted (2026-05-31)**: bar lives **inside** the workspace, slotted between the top header bar (search bar / sidebar icons / Update button — `Workspace::render_tab_bar`) and the panels row. Reads as in-app chrome instead of a band glued to the title bar. |
 | Q3 | **Pill rendering** | Hand-rolled `ProjectTabComponent` (`app/src/workspace/project_tab.rs`) matching session-tab visual tokens (no corner radius, side-only borders shared between adjacent tabs, **same `fg_overlay_1`/`fg_overlay_2`/outline tokens**). Active tab gets a 15% `theme.accent()` tint — the one intentional departure from session-tab neutrals so the active project reads at a glance. No reuse of `TabComponent`. |
 | Q4 | **Rename scope** | Persisted project name, origin-aware. Not display-only/ephemeral. |
-| Q5 | **Rename key** | `(origin, canonical_path)`. New `project_display_names` table; `ProjectSwitcher::identity()` consults it before falling back to default name. |
+| Q5 | **Rename key** | `(origin, canonical_path)` where `origin` is one of the two simplified variants — `Config { config_name }` or `Template { template_name }` (see [`projects-origin-simplification.md`](./projects-origin-simplification.md)). New `project_display_names` table; `ProjectSwitcher::identity()` consults it before falling back to default name. |
 | Q6 | **Rename trigger** | Double-click the pill → inline editor in-place + `F2` keybinding for the active project tab. Enter commits, Esc cancels. Empty string ⇒ revert to default name. |
 | Q7 | **Single-tab visibility** | Always show the bar, even with one project tab (drop the current `tab_count > 1` gate at `root_view.rs:3836`). Chrome stability + discoverability. |
 | Q8 | **Hide/show** | `F3` toggles bar visibility, persisted globally. Default visible. |
@@ -171,12 +171,14 @@ transcript views don't host projects.
   `handle_tab_settings_change` (`workspace/view.rs:3583`) that calls
   `ctx.notify()` to kick a workspace re-render when the setting changes.
 
-### Out-of-palette: default-name sequence (`root_view.rs`)
+### Out-of-palette: default-name sequence (`workspace/template_sequence.rs`)
 
-- New default-origin tabs are now named `default`, `default 1`, `default 2`, … —
-  helper `next_default_name(ctx)` scans live `ProjectSwitcher` Default-origin tabs
-  and picks the first free slot. Replaces the previous "directory basename"
-  derivation in `open_default_session`.
+- Template-origin tabs are named `<template>-N` (`default-1`, `default-2`, …) — pure helper
+  `template_sequence::next_template_sequence_name(template_name, in_use_names)` picks the smallest
+  free slot for the given template, with gap-fill on close. Originally `default`/`default 1`/…
+  under a `Default` origin via `next_default_name(ctx)` in `root_view.rs`; refactored into a pure
+  module and generalized to every template by the origin-simplification work (see
+  [`projects-origin-simplification.md`](./projects-origin-simplification.md)).
 
 ### Failed attempt, reverted
 
@@ -202,7 +204,7 @@ renderer that already owns the surface** rather than building parallel chip code
 | Path **below** name as subtitle | ✅ already worked | Renderer's `Flex::column` did this all along. |
 | Section headers always shown | ❌ | `data_source.rs::assemble_sections` still gates on `show_headers > 1`. |
 | `default` template sorted at bottom of Available | ❌ | `available_section` sorts alphabetically. |
-| Default-name sequence `default`/`default 1`/… | ✅ done | `root_view.rs::next_default_name`. |
+| Template-name sequence `<template>-N` (gap-fill) | ✅ done | `workspace/template_sequence::next_template_sequence_name`; the original `next_default_name` was generalised and pulled into a pure module by the origin simplification. |
 | Symmetric popup chrome | ✅ done | view.rs padding_top + palette_styles.rs gutter to 10. |
 | Project bar redesign (Step 3) | ✅ done | Bar lives inside `Workspace::render` between the top header bar and the panels row. Session-tab-styled `ProjectTabComponent` (rectangular, shared right separators, 15% accent active tint), tabs `Expanded` to evenly split the bar width with centered labels. F3 toggles, persisted globally. `~`-named tab investigation still open. |
 

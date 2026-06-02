@@ -1,11 +1,21 @@
 # Projects Redesign — Templates · Projects · Windows
 
-> Personal fork feature (branch `feat/projects-palette`). This document is the
-> implementation spec for reworking how windows, projects, and templates relate
-> in the `projects:` palette + Alt+Tab switcher. It supersedes the earlier
-> ad-hoc `ProjectSwitcher` (HashMap `name → WindowId`) model.
+> ⚠️ **Doubly superseded — historical reference only.** This document was first superseded by the
+> projects-as-tabs pivot in [`projects-tabs-redesign.md`](./projects-tabs-redesign.md) (windows
+> stopped being projects; workspaces became the per-project unit). It is now also superseded by
+> [`projects-origin-simplification.md`](./projects-origin-simplification.md), which collapsed the
+> four-variant origin enum referenced throughout this doc (`Config` · `Template` · `Default` ·
+> `Root`) down to two (`Config { config_name }` · `Template { template_name }`) and made root a
+> runtime-synthetic Config. Read this file only to understand the original windows-as-projects
+> design intent; do not consult it for current behavior.
 >
-> **Status:** spec approved, implementation pending.
+> Personal fork feature (branch `feat/projects-palette`). Original framing: implementation spec
+> for reworking how windows, projects, and templates relate in the `projects:` palette + Alt+Tab
+> switcher. It supersedes the earlier ad-hoc `ProjectSwitcher` (HashMap `name → WindowId`) model.
+>
+> **Status:** spec approved, implementation pending. *(Original status line, retained for
+> context — both the projects-as-tabs and origin-simplification work have since landed; see the
+> banner above.)*
 
 ## Why
 

@@ -24,8 +24,11 @@ OS Window  →  RootView  →  [ Workspace … ]  (one active)  →  session-tab
 - **Workspace** = **project-tab** = **project** — the thing an OS window used to hold exactly one of.
   Now an OS window holds N of them with one active. Each has its own session-tab strip, panes, cwd,
   and git branch. Switched via the project bar, the projects palette, or Alt+Tab.
-  - Every workspace has an **origin**: `Config` (saved launch config) · `Template` (path-less config
-    rooted on open) · `Default` (ad-hoc, e.g. `newds`) · `Root` (the startup workspace).
+  - Every workspace has an **origin**: `Config { config_name }` (saved launch config with baked
+    `cwd`s — also covers the synthetic startup `root`) · `Template { template_name }` (path-less
+    config applied at a path supplied at open time, including the built-in `default` template behind
+    `cmd-shift-N` and `newds`). See [`projects-origin-simplification.md`](./projects-origin-simplification.md)
+    for the dedupe rules and the collapse from the earlier four-variant model.
 
 - **Session-tab** — a tab *inside* a workspace (the original Warp tab strip). `cmd+t` makes one;
   `cmd+w` closes one. Closing the **last** session-tab closes the **workspace** (and, if it was the
@@ -33,13 +36,11 @@ OS Window  →  RootView  →  [ Workspace … ]  (one active)  →  session-tab
 
 - **Pane** — a split within a session-tab (one shell PTY). Unchanged by this feature.
 
-- **Plain window / "Open Window"** — historically, a `cmd+n` workspace with no project identity.
-  In the palette these still appear under the **"Open Windows"** section (distinct from
-  **"Open Projects"**). Note: a plain workspace is just an *unstamped workspace*; it lives in some OS
-  window like any other.
-
-- **Root project** — the workspace the app starts with. Auto-stamped `origin = Root` so it shows in
-  the palette from boot.
+- **Root project** — the runtime-synthetic startup workspace at `~`. There is no `root.yaml` on
+  disk; it's a `Config { config_name: "root" }` auto-spawned when persisted state contains zero
+  windows (first launch, after the origin-simplification state wipe, or after a session that left
+  no windows behind). Reopenable from the projects palette's Available section any time it isn't
+  currently live.
 
 ## Surfaces
 
