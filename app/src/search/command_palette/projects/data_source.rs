@@ -67,6 +67,12 @@ struct OpenRow {
     diff_stats: Option<DiffStats>,
     /// Project origin for the row's icon; `None` for plain (`cmd+n`) tabs.
     origin: Option<ProjectOrigin>,
+    /// The workspace's original identity-derived name (`default-1`, `dotfiles`,
+    /// `root`), used as a second search target so a renamed tab is findable
+    /// by either label. `None` for plain (`cmd+n`) tabs with no identity, and
+    /// for rows where the override equals the identity name (deduped to avoid
+    /// double-scoring the same string). See `docs/projects-rename.md`.
+    identity_name: Option<String>,
 }
 
 impl SyncDataSource for DataSource {
@@ -105,6 +111,14 @@ impl SyncDataSource for DataSource {
                     .map(|i| i.path.clone())
                     .or_else(|| workspace_cwd(workspace_id, app));
                 let (path, branch, diff_stats) = path_details(cwd.as_deref());
+                // Second search target so a renamed tab is findable by typing
+                // either the override OR the original identity-derived name.
+                // Drop when the row's `name` already equals the identity (the
+                // un-overridden case) — otherwise the same string would be
+                // scored twice and skew sort order.
+                let identity_name = identity
+                    .map(|i| i.name.clone())
+                    .filter(|original| *original != name);
                 Some(OpenRow {
                     name,
                     workspace_id,
@@ -113,6 +127,7 @@ impl SyncDataSource for DataSource {
                     branch,
                     diff_stats,
                     origin: identity.map(|i| i.origin.clone()),
+                    identity_name,
                 })
             })
             .collect();
@@ -164,6 +179,9 @@ impl SyncDataSource for DataSource {
                     branch,
                     diff_stats,
                     origin: None,
+                    // Plain (`cmd+n`) tabs have no identity name to fall back to;
+                    // the cwd-derived `name` is their only search target.
+                    identity_name: None,
                 }
             })
             .collect();
@@ -215,6 +233,12 @@ impl Entity for DataSource {
 /// display order. With a non-empty `term` only fuzzy-matching rows are kept, sorted by match score
 /// (best first); with an empty term every row is kept in its given order. All rows get score 0.0 so
 /// the mixer preserves this order and the section separators stay put.
+///
+/// For renamed project-tabs, the fuzzy matcher considers the union of the row's
+/// displayed `name` (override or identity) and its original `identity_name`,
+/// so typing either label finds the tab. Highlight indices come from
+/// whichever string contributed the higher score, preferring the displayed
+/// `name` on ties so highlights track what's on screen.
 fn open_window_section(rows: &[OpenRow], term: &str) -> Vec<QueryResult<CommandPaletteItemAction>> {
     if term.is_empty() {
         return rows
@@ -222,18 +246,38 @@ fn open_window_section(rows: &[OpenRow], term: &str) -> Vec<QueryResult<CommandP
             .map(|row| open_window_item_ref(row, Vec::new()))
             .collect();
     }
-    let mut matched: Vec<(f64, &OpenRow, Vec<usize>)> = rows
-        .iter()
-        .filter_map(|row| {
-            let result = match_indices_case_insensitive(&row.name, term)?;
-            Some((result.score as f64, row, result.matched_indices))
-        })
-        .collect();
+    let mut matched: Vec<(f64, &OpenRow, Vec<usize>)> =
+        rows.iter().filter_map(|row| match_row(row, term)).collect();
     matched.sort_by(|a, b| b.0.total_cmp(&a.0));
     matched
         .into_iter()
         .map(|(_, row, indices)| open_window_item_ref(row, indices))
         .collect()
+}
+
+/// Best fuzzy match for an open-row against `term`, considering both the
+/// displayed name AND (when present) the original identity-derived name. The
+/// displayed name's indices are preferred on a tie so the on-screen highlight
+/// tracks the user's typed query against what they actually see.
+fn match_row<'a>(row: &'a OpenRow, term: &str) -> Option<(f64, &'a OpenRow, Vec<usize>)> {
+    let name_match = match_indices_case_insensitive(&row.name, term);
+    let identity_match = row
+        .identity_name
+        .as_deref()
+        .and_then(|identity| match_indices_case_insensitive(identity, term));
+    match (name_match, identity_match) {
+        (Some(name_hit), Some(identity_hit)) => {
+            // Tie-break to `name` so highlights stay on the displayed label.
+            if (identity_hit.score as f64) > (name_hit.score as f64) {
+                Some((identity_hit.score as f64, row, Vec::new()))
+            } else {
+                Some((name_hit.score as f64, row, name_hit.matched_indices))
+            }
+        }
+        (Some(name_hit), None) => Some((name_hit.score as f64, row, name_hit.matched_indices)),
+        (None, Some(identity_hit)) => Some((identity_hit.score as f64, row, Vec::new())),
+        (None, None) => None,
+    }
 }
 
 /// Builds the rendered rows for the "Available" section (saved projects + templates not currently
@@ -407,4 +451,67 @@ fn current_diff_stats(cwd: &Path) -> Option<DiffStats> {
         insertions,
         deletions,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use warpui::EntityId;
+
+    use super::{match_row, OpenRow};
+
+    fn row(name: &str, identity_name: Option<&str>) -> OpenRow {
+        OpenRow {
+            name: name.to_string(),
+            workspace_id: EntityId::from_usize(1),
+            window_id: warpui::WindowId::from_usize(1),
+            path: None,
+            branch: None,
+            diff_stats: None,
+            origin: None,
+            identity_name: identity_name.map(String::from),
+        }
+    }
+
+    #[test]
+    fn renamed_row_matches_override_query() {
+        let row = row("api-prod", Some("default-1"));
+        let hit = match_row(&row, "api");
+        assert!(hit.is_some(), "expected `api` to match override `api-prod`");
+    }
+
+    #[test]
+    fn renamed_row_matches_identity_query() {
+        let row = row("api-prod", Some("default-1"));
+        let hit = match_row(&row, "default");
+        assert!(
+            hit.is_some(),
+            "expected `default` to match original identity `default-1`"
+        );
+    }
+
+    #[test]
+    fn renamed_row_does_not_match_unrelated_query() {
+        let row = row("api-prod", Some("default-1"));
+        assert!(match_row(&row, "nonsense").is_none());
+    }
+
+    #[test]
+    fn unrenamed_row_with_no_identity_falls_back_to_name_only() {
+        // Plain `cmd+n` tabs have no identity, so the name is the only target.
+        let row = row("scratch", None);
+        assert!(match_row(&row, "scra").is_some());
+        assert!(match_row(&row, "default").is_none());
+    }
+
+    #[test]
+    fn matching_only_displayed_name_keeps_its_indices() {
+        // When the query hits only `name` (not `identity_name`), the indices
+        // come from `name` so the on-screen highlight tracks the typed query.
+        let row = row("api-prod", Some("default-1"));
+        let (_score, _row, indices) = match_row(&row, "api").unwrap();
+        assert!(
+            !indices.is_empty(),
+            "indices should track displayed name when it matched"
+        );
+    }
 }
