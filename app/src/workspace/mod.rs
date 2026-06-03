@@ -753,6 +753,16 @@ pub fn init(app: &mut AppContext) {
         )
         .with_context_predicate(id!("Workspace"))
         .with_mac_key_binding("f3"),
+        // F2 — mac-only for the same reason as F3 (linux/windows binds F2 to "find
+        // next" in `view_components/find.rs`). Opens the inline rename editor on the
+        // active project-tab's pill. See `docs/projects-rename.md`.
+        EditableBinding::new(
+            "workspace:rename_project_tab",
+            BindingDescription::new("Rename Project Tab"),
+            WorkspaceAction::RenameProjectTab,
+        )
+        .with_context_predicate(id!("Workspace"))
+        .with_mac_key_binding("f2"),
         EditableBinding::new(
             TOGGLE_RIGHT_PANEL_BINDING_NAME,
             BindingDescription::new("Toggle code review")

@@ -928,14 +928,36 @@ pub struct TransferredTab {
     pub draggable_state: DraggableState,
 }
 
-/// Pure resolver for [`Workspace::display_name`], extracted so it can be
-/// unit-tested without standing up a full `Workspace` fixture. Identity name
-/// when the tab is stamped; `"project"` fallback otherwise.
-fn resolve_workspace_display_name(view_id: EntityId, switcher: &ProjectSwitcher) -> String {
+/// Pure resolver for [`Workspace::display_name`], extracted so the
+/// override-first ordering and the identity fallback are unit-testable
+/// without standing up a full `Workspace` fixture. The override short-circuits
+/// when present; otherwise the stamped identity name; otherwise the
+/// `"project"` fallback.
+fn resolve_workspace_display_name(
+    display_name_override: Option<&str>,
+    view_id: EntityId,
+    switcher: &ProjectSwitcher,
+) -> String {
+    if let Some(override_name) = display_name_override {
+        return override_name.to_string();
+    }
     switcher
         .identity(view_id)
         .map(|i| i.name.clone())
         .unwrap_or_else(|| "project".to_string())
+}
+
+/// Pure mapper from the rename editor's raw buffer to the override value to
+/// store on commit. Trims whitespace; an empty trimmed buffer maps to
+/// `None` (clear the override). Cancel and "no change" paths short-circuit
+/// before calling this; this only runs on a commit.
+fn override_from_buffer(buffer: &str) -> Option<String> {
+    let trimmed = buffer.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -944,7 +966,7 @@ mod display_name_tests {
 
     use warpui::EntityId;
 
-    use super::resolve_workspace_display_name;
+    use super::{override_from_buffer, resolve_workspace_display_name};
     use crate::workspace::{ProjectIdentity, ProjectOrigin, ProjectSwitcher};
 
     fn id(value: usize) -> EntityId {
@@ -969,14 +991,67 @@ mod display_name_tests {
         let mut switcher = ProjectSwitcher::default();
         stamp(&mut switcher, id(1), "alpha");
 
-        assert_eq!(resolve_workspace_display_name(id(1), &switcher), "alpha");
+        assert_eq!(
+            resolve_workspace_display_name(None, id(1), &switcher),
+            "alpha"
+        );
     }
 
     #[test]
     fn returns_project_fallback_when_unstamped() {
         let switcher = ProjectSwitcher::default();
 
-        assert_eq!(resolve_workspace_display_name(id(42), &switcher), "project");
+        assert_eq!(
+            resolve_workspace_display_name(None, id(42), &switcher),
+            "project"
+        );
+    }
+
+    #[test]
+    fn override_wins_over_identity_name() {
+        let mut switcher = ProjectSwitcher::default();
+        stamp(&mut switcher, id(1), "default-1");
+
+        assert_eq!(
+            resolve_workspace_display_name(Some("api-prod"), id(1), &switcher),
+            "api-prod"
+        );
+    }
+
+    #[test]
+    fn override_wins_even_when_identity_missing() {
+        let switcher = ProjectSwitcher::default();
+
+        assert_eq!(
+            resolve_workspace_display_name(Some("home"), id(7), &switcher),
+            "home"
+        );
+    }
+
+    #[test]
+    fn override_from_buffer_keeps_non_empty_trimmed_text() {
+        assert_eq!(
+            override_from_buffer("  api-prod  "),
+            Some("api-prod".to_string())
+        );
+    }
+
+    #[test]
+    fn override_from_buffer_preserves_internal_whitespace() {
+        assert_eq!(
+            override_from_buffer("  api prod  "),
+            Some("api prod".to_string())
+        );
+    }
+
+    #[test]
+    fn override_from_buffer_returns_none_for_empty() {
+        assert_eq!(override_from_buffer(""), None);
+    }
+
+    #[test]
+    fn override_from_buffer_returns_none_for_whitespace_only() {
+        assert_eq!(override_from_buffer("   \t \n"), None);
     }
 }
 
@@ -993,6 +1068,19 @@ pub struct Workspace {
     traffic_light_mouse_states: TrafficLightMouseStates,
     tab_rename_editor: ViewHandle<EditorView>,
     pane_rename_editor: ViewHandle<EditorView>,
+    /// Inline editor that hosts the project-tab pill rename
+    /// (`WorkspaceAction::RenameProjectTab`).
+    project_tab_rename_editor: ViewHandle<EditorView>,
+    /// The workspace whose pill is currently in rename mode, if any. Always
+    /// matches the active workspace at edit-open time (F2 / double-click both
+    /// fire on the active tab); cleared on commit / cancel / when the target
+    /// closes. The `render_project_bar` loop swaps the matching pill's label
+    /// for the inline editor.
+    project_tab_rename_target: Option<EntityId>,
+    /// Per-tab override for the project-bar pill / palette / Alt+Tab label.
+    /// `None` means show the identity-derived name. See
+    /// `docs/projects-rename.md` and [`Workspace::display_name`].
+    display_name_override: Option<String>,
     vertical_tabs_search_input: ViewHandle<EditorView>,
     tips_completed: ModelHandle<TipsCompleted>,
     user_default_shell_unsupported_banner_model_handle: ModelHandle<BannerState>,
@@ -1167,12 +1255,34 @@ impl Workspace {
     }
 
     /// Display name shown on this workspace's project-bar pill, projects-palette
-    /// row, and Alt+Tab row — the single read path for the three surfaces, so
-    /// later slices (`docs/projects-rename.md`) can layer in a per-tab override
-    /// at one location. Resolves to the stamped identity name when present;
-    /// `"project"` fallback for an unstamped (`cmd+n`) tab.
+    /// row, and Alt+Tab row — the single read path for the three surfaces.
+    /// Resolution order: per-tab override (`display_name_override`) when set,
+    /// then the stamped identity name, then `"project"` fallback for an
+    /// unstamped (`cmd+n`) tab. See `docs/projects-rename.md`.
     pub fn display_name(&self, view_id: EntityId, switcher: &ProjectSwitcher) -> String {
-        resolve_workspace_display_name(view_id, switcher)
+        resolve_workspace_display_name(self.display_name_override.as_deref(), view_id, switcher)
+    }
+
+    /// Per-tab override stored on this workspace; `None` means the identity
+    /// name is used. Read by external code that needs to round-trip the value
+    /// (e.g. persistence-layer snapshot of the workspace).
+    pub fn display_name_override(&self) -> Option<&str> {
+        self.display_name_override.as_deref()
+    }
+
+    /// Replaces the per-tab display-name override. `None` clears it; the pill
+    /// snaps back to the identity name. Whitespace trimming and empty→`None`
+    /// normalization are the caller's responsibility (see
+    /// [`override_from_buffer`]).
+    pub fn set_display_name_override(
+        &mut self,
+        value: Option<String>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.display_name_override != value {
+            self.display_name_override = value;
+            ctx.notify();
+        }
     }
 
     fn tab_rename_editor_font_size(ctx: &AppContext, appearance: &Appearance) -> f32 {
@@ -1392,6 +1502,28 @@ impl Workspace {
         editor
     }
 
+    /// Builds the inline editor used by the project-tab rename gesture
+    /// (F2 / double-click on the active pill). Same single-line editor shape
+    /// the session-tab rename uses; sized to the project-tab pill's label
+    /// font.
+    fn project_tab_rename_editor(ctx: &mut ViewContext<Self>) -> ViewHandle<EditorView> {
+        let editor = ctx.add_typed_action_view(|ctx| {
+            let appearance = Appearance::as_ref(ctx);
+            let options = SingleLineEditorOptions {
+                text: TextOptions::ui_text(
+                    Some(crate::workspace::project_tab::PROJECT_TAB_LABEL_FONT_SIZE),
+                    appearance,
+                ),
+                ..Default::default()
+            };
+            EditorView::single_line(options, ctx)
+        });
+        ctx.subscribe_to_view(&editor, move |me, _, event, ctx| {
+            me.handle_project_tab_rename_editor_event(event, ctx);
+        });
+        editor
+    }
+
     pub fn handle_tab_rename_editor_event(
         &mut self,
         event: &EditorEvent,
@@ -1480,6 +1612,85 @@ impl Workspace {
             self.focus_pane(locator, ctx);
             ctx.notify();
         }
+    }
+
+    /// Editor event router for the project-tab pill rename. Mirrors the
+    /// session-tab rename handler: Blurred (clicked outside) and Enter commit;
+    /// Escape cancels. No-ops when no project-tab is currently being renamed.
+    pub fn handle_project_tab_rename_editor_event(
+        &mut self,
+        event: &EditorEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.project_tab_rename_target.is_some() {
+            match event {
+                EditorEvent::Blurred | EditorEvent::Enter => {
+                    self.finish_project_tab_rename(ctx);
+                }
+                EditorEvent::Escape => {
+                    self.cancel_project_tab_rename(ctx);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Opens the inline rename editor on `view_id`'s pill — the workspace whose
+    /// project-bar pill becomes editable. Pre-populates the editor with the
+    /// current display name and select-all's the buffer (replace gesture, vs
+    /// `new_project_popup`'s append gesture). Focuses the editor so the next
+    /// keystroke goes to it.
+    fn start_project_tab_rename(&mut self, view_id: EntityId, ctx: &mut ViewContext<Self>) {
+        let switcher = ProjectSwitcher::as_ref(ctx);
+        let initial = self.display_name(view_id, switcher);
+        self.project_tab_rename_target = Some(view_id);
+        self.clear_project_tab_rename_editor(ctx);
+        self.project_tab_rename_editor.update(ctx, |editor, ctx| {
+            // `insert_selected_text` mirrors what `rename_tab_internal` uses for
+            // session tabs: inserts the text *and* leaves it selected, so the
+            // next keystroke replaces the whole buffer.
+            editor.insert_selected_text(&initial, ctx);
+        });
+        ctx.focus(&self.project_tab_rename_editor);
+        ctx.notify();
+    }
+
+    /// Commit path: reads the editor's buffer, trims, sets the override (or
+    /// clears it when empty), kicks a save, and closes the editor. The
+    /// buffer-to-override mapping is the pure-tested [`override_from_buffer`].
+    fn finish_project_tab_rename(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(target) = self.project_tab_rename_target.take() else {
+            return;
+        };
+        let buffer = self.project_tab_rename_editor.as_ref(ctx).buffer_text(ctx);
+        let new_override = override_from_buffer(&buffer);
+        let registry = WorkspaceRegistry::as_ref(ctx);
+        let target_handle = registry.workspace_handle(target, ctx);
+        self.clear_project_tab_rename_editor(ctx);
+        self.focus_active_tab(ctx);
+        if let Some(handle) = target_handle {
+            handle.update(ctx, |workspace, ctx| {
+                workspace.set_display_name_override(new_override, ctx);
+            });
+            ctx.dispatch_global_action("workspace:save_app", ());
+        }
+        ctx.notify();
+    }
+
+    /// Cancel path: closes the editor without touching the override. Used on
+    /// Escape and on workspace teardown.
+    fn cancel_project_tab_rename(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.project_tab_rename_target.take().is_some() {
+            self.clear_project_tab_rename_editor(ctx);
+            self.focus_active_tab(ctx);
+            ctx.notify();
+        }
+    }
+
+    fn clear_project_tab_rename_editor(&mut self, ctx: &mut ViewContext<Self>) {
+        self.project_tab_rename_editor.update(ctx, |editor, ctx| {
+            editor.clear_buffer_and_reset_undo_stack(ctx);
+        });
     }
 
     fn build_import_modal(ctx: &mut ViewContext<Self>) -> ViewHandle<ImportModal> {
@@ -3157,6 +3368,13 @@ impl Workspace {
             traffic_light_mouse_states: Default::default(),
             tab_rename_editor: Self::tab_rename_editor(ctx),
             pane_rename_editor: Self::pane_rename_editor(ctx),
+            project_tab_rename_editor: Self::project_tab_rename_editor(ctx),
+            project_tab_rename_target: None,
+            // The persistence layer wires this from `WindowSnapshot` in #03.
+            // For now every freshly-constructed workspace starts overrideless;
+            // the override is set at runtime via F2 / double-click and lost on
+            // tab close. (See `docs/projects-rename.md`.)
+            display_name_override: None,
             vertical_tabs_search_input: Self::vertical_tabs_search_input(ctx),
             tips_completed,
             user_default_shell_unsupported_banner_model_handle,
@@ -19166,6 +19384,12 @@ impl Workspace {
             let view_id = workspace.id();
             let tab_states = states.entry(view_id).or_default().clone();
             let identity = switcher.identity(view_id);
+            // F2 / double-click sets `project_tab_rename_target` on the active
+            // workspace's view — that's `self` here, since `render` runs on the
+            // active workspace. The matching pill swaps its label for the
+            // shared rename editor.
+            let rename_editor = (self.project_tab_rename_target == Some(view_id))
+                .then(|| self.project_tab_rename_editor.clone());
             let component = ProjectTabComponent {
                 label: workspace.as_ref(app).display_name(view_id, switcher),
                 origin: identity.map(|i| i.origin.clone()),
@@ -19176,6 +19400,7 @@ impl Workspace {
                 tab_mouse_state: tab_states.pill,
                 close_mouse_state: tab_states.close,
                 appearance,
+                rename_editor,
             };
             // `Expanded::new(1.0, …)` gives each tab an equal fraction of the row width.
             row.add_child(Expanded::new(1.0, component.render()).finish());
@@ -22046,6 +22271,12 @@ impl TypedActionView for Workspace {
                     let _ = settings.project_bar_visible.set_value(new_value, ctx);
                 });
                 ctx.notify();
+            }
+            RenameProjectTab => {
+                // F2 / double-click both fire on the active workspace's view, so the
+                // target is always self. `ctx.view_id()` is this workspace's EntityId.
+                let view_id = ctx.view_id();
+                self.start_project_tab_rename(view_id, ctx);
             }
             #[cfg(feature = "local_fs")]
             OpenCodeReviewPanel(locator) => {

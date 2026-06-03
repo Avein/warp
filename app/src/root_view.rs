@@ -681,6 +681,12 @@ fn focus_or_spawn_project(arg: &FocusOrSpawnProjectArg, ctx: &mut AppContext) {
     let display_name = match &origin {
         ProjectOrigin::Template { template_name } => {
             let switcher = ProjectSwitcher::as_ref(ctx);
+            // `in_use_names` MUST source from the *identity* name, NOT from the
+            // display name. A user-typed override (per `docs/projects-rename.md`)
+            // visually replaces `default-N` on the pill but does not free up that
+            // slot in the sequence — otherwise opening another template at a new
+            // path would reshuffle the live sequence in surprising ways. See the
+            // PRD's "template_sequence does NOT consult overrides" section.
             let in_use: std::collections::HashSet<String> = switcher
                 .projects_mru(ctx)
                 .iter()

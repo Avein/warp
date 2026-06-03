@@ -11,14 +11,17 @@
 
 use warp_core::ui::theme::color::internal_colors;
 use warpui::elements::{
-    Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Fill, Flex, Hoverable,
-    MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius, Text,
+    Align, Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Fill, Flex,
+    Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius, Text,
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::platform::Cursor;
-use warpui::{Element, EntityId, WindowId};
+use warpui::ui_components::components::{UiComponent, UiComponentStyles};
+use warpui::ui_components::text_input::TextInput;
+use warpui::{Element, EntityId, ViewHandle, WindowId};
 
 use crate::appearance::Appearance;
+use crate::editor::EditorView;
 use crate::root_view::CloseWorkspaceArg;
 use crate::ui_components::icons::Icon;
 use crate::workspace::project_icon::icon_for_origin;
@@ -52,6 +55,12 @@ pub struct ProjectTabComponent<'a> {
     pub tab_mouse_state: MouseStateHandle,
     pub close_mouse_state: MouseStateHandle,
     pub appearance: &'a Appearance,
+    /// When `Some`, this pill is in rename mode: the label span is replaced
+    /// by an inline editor. The editor's lifecycle (focus, commit, cancel)
+    /// is owned by the workspace via
+    /// `Workspace::handle_project_tab_rename_editor_event`. See
+    /// `docs/projects-rename.md`.
+    pub rename_editor: Option<ViewHandle<EditorView>>,
 }
 
 impl<'a> ProjectTabComponent<'a> {
@@ -65,13 +74,17 @@ impl<'a> ProjectTabComponent<'a> {
         let is_first = self.is_first;
         let view_id = self.view_id;
         let window_id = self.window_id;
+        let rename_editor = self.rename_editor;
 
         let active_border_fill = internal_colors::fg_overlay_2(theme);
         let inactive_border_fill = internal_colors::fg_overlay_1(theme);
 
-        Hoverable::new(self.tab_mouse_state, {
+        let is_renaming = rename_editor.is_some();
+
+        let hoverable = Hoverable::new(self.tab_mouse_state, {
             let close_state = self.close_mouse_state;
             let label = self.label;
+            let rename_editor = rename_editor.clone();
             move |state| {
                 // `MainAxisSize::Max` + `MainAxisAlignment::Center` centers the icon + label inside
                 // the tab's slot. Without Max the row collapses to intrinsic width and there's
@@ -93,13 +106,37 @@ impl<'a> ProjectTabComponent<'a> {
                     .finish(),
                 );
 
-                let mut text =
-                    Text::new_inline(label.clone(), ui_font_family, PROJECT_TAB_LABEL_FONT_SIZE)
-                        .with_color(label_color.into());
-                if is_active {
-                    text = text.with_style(Properties::default().weight(Weight::Medium));
+                if let Some(editor) = rename_editor.clone() {
+                    // Rename in progress on this pill: swap the label span for an inline editor.
+                    // Outer pill chrome (icon, border, active tint) stays untouched per
+                    // `docs/projects-rename.md`. Transparent background and zero radius/border
+                    // keep the editor visually flush with the pill it replaces.
+                    inner.add_child(
+                        Align::new(
+                            TextInput::new(
+                                editor,
+                                UiComponentStyles::default()
+                                    .set_background(Fill::None)
+                                    .set_border_radius(CornerRadius::with_all(Radius::Pixels(0.)))
+                                    .set_border_width(0.),
+                            )
+                            .build()
+                            .finish(),
+                        )
+                        .finish(),
+                    );
+                } else {
+                    let mut text = Text::new_inline(
+                        label.clone(),
+                        ui_font_family,
+                        PROJECT_TAB_LABEL_FONT_SIZE,
+                    )
+                    .with_color(label_color.into());
+                    if is_active {
+                        text = text.with_style(Properties::default().weight(Weight::Medium));
+                    }
+                    inner.add_child(text.finish());
                 }
-                inner.add_child(text.finish());
 
                 // Close `×` only while the tab is hovered. Inner click handler stops the event
                 // inside the X's bounds so it doesn't bubble to the tab-activate handler below.
@@ -160,11 +197,22 @@ impl<'a> ProjectTabComponent<'a> {
                     .with_border(border)
                     .finish()
             }
-        })
-        .with_cursor(Cursor::PointingHand)
-        .on_click(move |ctx, _app, _v2f| {
-            ctx.dispatch_action("root_view:activate_project_tab", view_id);
-        })
-        .finish()
+        });
+
+        // While the pill hosts the rename editor, the pill body should not
+        // dispatch `activate_project_tab` on click — that path refocuses the
+        // workspace and would yank focus away from the editor. The close `×`
+        // keeps its own handler (inner element with `stop_propagation`-style
+        // behavior via being a separate Hoverable above).
+        if is_renaming {
+            hoverable.finish()
+        } else {
+            hoverable
+                .with_cursor(Cursor::PointingHand)
+                .on_click(move |ctx, _app, _v2f| {
+                    ctx.dispatch_action("root_view:activate_project_tab", view_id);
+                })
+                .finish()
+        }
     }
 }

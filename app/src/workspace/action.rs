@@ -122,6 +122,11 @@ pub enum WorkspaceAction {
     /// so the action is reachable from the binding registry / Command Palette
     /// (see #9351). The context-menu path keeps using `RenamePane(locator)`.
     RenameActivePane,
+    /// Opens the in-place editor on the active project-tab's pill so the user
+    /// can override its display name. Bound to F2 on macOS (see
+    /// `docs/projects-rename.md`). The editor itself dispatches save on
+    /// commit; this action just enters the editing state.
+    RenameProjectTab,
     SetActiveTabName(String),
     /// Sets the manual color override for the active tab.
     ///
@@ -772,6 +777,7 @@ impl WorkspaceAction {
             | ResetTabName(_)
             | RenamePane(_)
             | ResetPaneName(_)
+            | RenameProjectTab
             | RenameActiveTab
             | RenameActivePane
             | SetActiveTabName(_)
