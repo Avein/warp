@@ -210,9 +210,103 @@ impl<'a> ProjectTabComponent<'a> {
             hoverable
                 .with_cursor(Cursor::PointingHand)
                 .on_click(move |ctx, _app, _v2f| {
-                    ctx.dispatch_action("root_view:activate_project_tab", view_id);
+                    match project_tab_click_outcome(is_active, 1) {
+                        ProjectTabClickOutcome::Activate => {
+                            ctx.dispatch_action("root_view:activate_project_tab", view_id);
+                        }
+                        ProjectTabClickOutcome::OpenRename | ProjectTabClickOutcome::Noop => {
+                            // Single click on active pill is a no-op; rename only
+                            // triggers on the second click of a pair (handled below
+                            // by `on_double_click`).
+                        }
+                    }
+                })
+                // Second click of a double-click pair: by the time this fires the
+                // first click has already activated the pill (see Hoverable
+                // semantics in `crates/warpui_core/src/elements/hoverable.rs:644`),
+                // so the gate is always "rename this pill". Mirrors the macOS
+                // Finder "click selects, click on selected renames" gesture.
+                .on_double_click(move |ctx, _app, _v2f| {
+                    if matches!(
+                        project_tab_click_outcome(is_active, 2),
+                        ProjectTabClickOutcome::OpenRename
+                    ) {
+                        ctx.dispatch_action("root_view:rename_project_tab", view_id);
+                    }
                 })
                 .finish()
         }
+    }
+}
+
+/// Outcome of a click on a project-tab pill body. Pure decision so the gesture
+/// matrix from `docs/issues/projects-rename-05-doubleclick-active-pill.md` is
+/// unit-testable without spinning up a workspace.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ProjectTabClickOutcome {
+    /// Activate this workspace (single click on inactive pill).
+    Activate,
+    /// Open the rename editor on this pill (double click on the active pill, or
+    /// the second click of an inactive → active → rename sequence — both end
+    /// with the pill being active when the second click fires).
+    OpenRename,
+    /// Do nothing (single click on the already-active pill).
+    Noop,
+}
+
+/// Maps `(is_active, click_count)` to a [`ProjectTabClickOutcome`]. Centralizes
+/// the gesture matrix described in `docs/projects-rename.md` so both the
+/// single-click and double-click handlers can stay one-liners.
+pub(crate) fn project_tab_click_outcome(
+    is_active: bool,
+    click_count: u32,
+) -> ProjectTabClickOutcome {
+    match (is_active, click_count) {
+        (false, 1) => ProjectTabClickOutcome::Activate,
+        (true, 1) => ProjectTabClickOutcome::Noop,
+        // Hoverable activates the pill on the first click of a pair, so by the
+        // second click `is_active` is true regardless of where the pair started.
+        (_, _) => ProjectTabClickOutcome::OpenRename,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_click_on_inactive_activates() {
+        assert_eq!(
+            project_tab_click_outcome(false, 1),
+            ProjectTabClickOutcome::Activate,
+        );
+    }
+
+    #[test]
+    fn single_click_on_active_is_noop() {
+        assert_eq!(
+            project_tab_click_outcome(true, 1),
+            ProjectTabClickOutcome::Noop,
+        );
+    }
+
+    #[test]
+    fn double_click_on_active_opens_rename() {
+        assert_eq!(
+            project_tab_click_outcome(true, 2),
+            ProjectTabClickOutcome::OpenRename,
+        );
+    }
+
+    #[test]
+    fn second_click_after_activation_opens_rename() {
+        // Double-click on a pill that started inactive: first click activates
+        // (re-render flips `is_active` to true), second click sees the pill as
+        // already active and opens the editor. Same outcome as the active-only
+        // case above — that's the point.
+        assert_eq!(
+            project_tab_click_outcome(true, 2),
+            ProjectTabClickOutcome::OpenRename,
+        );
     }
 }

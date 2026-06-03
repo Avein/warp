@@ -318,6 +318,7 @@ pub fn init(app: &mut AppContext) {
     app.add_global_action("root_view:close_project", close_project);
     app.add_global_action("root_view:focus_project_workspace", focus_project_workspace);
     app.add_global_action("root_view:close_project_workspace", close_project_workspace);
+    app.add_global_action("root_view:rename_project_tab", rename_project_tab);
     app.add_global_action("root_view:send_feedback", send_feedback);
     app.add_global_action(
         "root_view:toggle_quake_mode_window",
@@ -892,6 +893,21 @@ fn focus_project_workspace(arg: &FocusWorkspaceArg, ctx: &mut AppContext) {
 /// secondary action on an open row in the `projects:` palette.
 fn close_project_workspace(arg: &CloseWorkspaceArg, ctx: &mut AppContext) {
     close_workspace(arg.workspace_id, ctx);
+}
+
+/// Opens the inline rename editor on the project-tab pill owned by the
+/// workspace with `view_id`. Mouse-trigger complement to the F2 binding —
+/// both ultimately fire `WorkspaceAction::RenameProjectTab` on the workspace,
+/// which is what `start_project_tab_rename` ties off. See
+/// `docs/projects-rename.md` and
+/// `docs/issues/projects-rename-05-doubleclick-active-pill.md`.
+fn rename_project_tab(view_id: &EntityId, ctx: &mut AppContext) {
+    let Some(handle) = WorkspaceRegistry::as_ref(ctx).workspace_handle(*view_id, ctx) else {
+        return;
+    };
+    handle.update(ctx, |workspace, ctx| {
+        workspace.handle_action(&WorkspaceAction::RenameProjectTab, ctx);
+    });
 }
 
 fn send_feedback(_: &(), ctx: &mut AppContext) {

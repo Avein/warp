@@ -960,7 +960,11 @@ fn override_from_buffer(buffer: &str) -> Option<String> {
     }
 }
 
+// The lint wants test modules at file end; this one is intentionally inline so it
+// sits next to the pure helpers (`override_from_buffer`, `resolve_workspace_display_name`)
+// it covers. The file's main test module is the external `view_tests.rs` (declared above).
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod display_name_tests {
     use std::path::PathBuf;
 
