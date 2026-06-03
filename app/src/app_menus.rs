@@ -86,6 +86,7 @@ pub fn dock_menu() -> Menu {
             "New Window",
             move |ctx| {
                 ctx.dispatch_global_action("root_view:open_new", &());
+                // Persist: PersistedStateMutation::NewOsWindowOpened
                 ctx.dispatch_global_action("workspace:save_app", &());
             },
             no_updates,
@@ -948,6 +949,7 @@ fn make_launch_config_menu_items(ctx: &mut AppContext) -> Vec<MenuItem> {
                         open_in_active_window: false,
                     }
                 );
+                // Persist: PersistedStateMutation::NewOsWindowOpened
                 ctx.dispatch_global_action("workspace:save_app", &());
             }),
             no_updates,
@@ -1103,6 +1105,7 @@ fn open_new_agent_tab_or_window(ctx: &mut AppContext) {
 /// Dispatch event to open a new Warp window
 fn open_new_window(ctx: &mut AppContext) {
     ctx.dispatch_global_action("root_view:open_new", &());
+    // Persist: PersistedStateMutation::NewOsWindowOpened
     ctx.dispatch_global_action("workspace:save_app", &());
 }
 

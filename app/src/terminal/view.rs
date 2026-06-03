@@ -12816,6 +12816,7 @@ impl TerminalView {
         };
 
         // Ensure that the new session's working directory and environment are persisted.
+        // Persist: PersistedStateMutation::SessionShellBootstrapped
         ctx.dispatch_global_action("workspace:save_app", ());
 
         self.update_incompatible_configuration_banner(session.shell().plugins(), ctx);

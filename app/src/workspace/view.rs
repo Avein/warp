@@ -1596,6 +1596,7 @@ impl Workspace {
         self.set_custom_pane_name(locator, title, ctx);
         self.clear_pane_name_editor(ctx);
         self.focus_pane(locator, ctx);
+        // Persist: PersistedStateMutation::SessionTabOrPaneRenameCommitted
         ctx.dispatch_global_action("workspace:save_app", ());
         ctx.notify();
     }
@@ -1682,6 +1683,7 @@ impl Workspace {
         self.set_display_name_override(new_override, ctx);
         self.clear_project_tab_rename_editor(ctx);
         self.focus_active_tab(ctx);
+        // Persist: PersistedStateMutation::ProjectTabRenamed
         ctx.dispatch_global_action("workspace:save_app", ());
         ctx.notify();
     }
@@ -5671,6 +5673,7 @@ impl Workspace {
             });
             ctx.emit(pane_group::Event::AppStateChanged);
         });
+        // Persist: PersistedStateMutation::SessionTabOrPaneRenameCommitted
         ctx.dispatch_global_action("workspace:save_app", ());
         ctx.notify();
     }
@@ -10915,6 +10918,7 @@ impl Workspace {
             _ => {}
         }
 
+        // Persist: PersistedStateMutation::SessionTabRemoved
         ctx.dispatch_global_action("workspace:save_app", ());
         ctx.notify();
     }
@@ -11064,6 +11068,7 @@ impl Workspace {
 
         // Telemetry whenever tabs actually closed, not when confirmation dialog comes up.
         if tabs_closed {
+            // Persist: PersistedStateMutation::SessionTabRemoved
             ctx.dispatch_global_action("workspace:save_app", ());
             send_telemetry_from_ctx!(
                 TelemetryEvent::TabOperations {
@@ -14592,6 +14597,7 @@ impl Workspace {
     ) {
         match event {
             pane_group::Event::AppStateChanged => {
+                // Persist: PersistedStateMutation::WorkspacePaneGroupStateChanged
                 ctx.dispatch_global_action("workspace:save_app", ());
                 self.refresh_working_directories_for_pane_group(&pane_group, ctx);
                 self.update_resource_center_action_target(ctx);
@@ -16685,6 +16691,7 @@ impl Workspace {
             }
             Resize => {
                 // A resize of universal search should write the app snapshot to sqlite.
+                // Persist: PersistedStateMutation::UniversalSearchResized
                 ctx.dispatch_global_action("workspace:save_app", ());
             }
         }
@@ -23760,6 +23767,7 @@ impl TypedActionView for Workspace {
             }
         };
         if action.should_save_app_state_on_action() {
+            // Persist: PersistedStateMutation::WorkspaceActionRequiringSave
             ctx.dispatch_global_action("workspace:save_app", ());
         }
     }
@@ -25382,6 +25390,7 @@ impl Workspace {
             pg.detach_panes_for_close(&working_directories_model, ctx);
         });
         self.pending_pane_group_transfer = false;
+        // Persist: PersistedStateMutation::CrossWindowTabTransferFinalized
         ctx.dispatch_global_action("workspace:save_app", ());
         ctx.notify();
     }

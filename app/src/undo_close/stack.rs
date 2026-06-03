@@ -269,6 +269,7 @@ impl UndoCloseStack {
 
                 // Make sure we update our session restoration state now that the
                 // window has been reopened.
+                // Persist: PersistedStateMutation::UndoCloseRestored
                 ctx.dispatch_global_action("workspace:save_app", &());
             }
             ClosedItem::Tab {
@@ -291,6 +292,7 @@ impl UndoCloseStack {
                 }
                 // Make sure we update our session restoration state now that the
                 // tab has been reopened.
+                // Persist: PersistedStateMutation::UndoCloseRestored
                 ctx.dispatch_global_action("workspace:save_app", &());
             }
             ClosedItem::Pane { data } => {
@@ -324,6 +326,7 @@ impl UndoCloseStack {
                             });
                         }
 
+                        // Persist: PersistedStateMutation::UndoCloseRestored
                         ctx.dispatch_global_action("workspace:save_app", &());
                     }
                 }

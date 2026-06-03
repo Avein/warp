@@ -2249,6 +2249,7 @@ pub(crate) fn app_callbacks(is_integration_test: bool) -> warpui::platform::AppC
             // menu item.
             App::record_last_active_timestamp();
             ctx.dispatch_global_action("root_view:open_new", &());
+            // Persist: PersistedStateMutation::NewOsWindowOpened
             ctx.dispatch_global_action("workspace:save_app", &());
         })),
         on_open_urls: Some(Box::new(move |urls, ctx| {
@@ -2284,6 +2285,7 @@ pub(crate) fn app_callbacks(is_integration_test: bool) -> warpui::platform::AppC
                 });
             }
 
+            // Persist: PersistedStateMutation::ActiveOsWindowChanged
             ctx.dispatch_global_action("workspace:save_app", &());
         })),
         on_window_will_close: Some(Box::new(move |closed_window_data, ctx| {
@@ -2296,12 +2298,17 @@ pub(crate) fn app_callbacks(is_integration_test: bool) -> warpui::platform::AppC
                     stack.handle_window_closed(window_data, ctx);
                 });
             }
+            // Persist: PersistedStateMutation::OsWindowClosed (non-terminating;
+            // the terminating branch is covered by PersistedStateMutation::AppWillTerminate
+            // from on_will_terminate)
             ctx.dispatch_global_action("workspace:save_app", &());
         })),
         on_window_moved: Some(Box::new(move |ctx| {
+            // Persist: PersistedStateMutation::OsWindowMovedOrResized
             ctx.dispatch_global_action("workspace:save_app", &());
         })),
         on_window_resized: Some(Box::new(move |ctx| {
+            // Persist: PersistedStateMutation::OsWindowMovedOrResized
             ctx.dispatch_global_action("workspace:save_app", &());
         })),
         ..Default::default()

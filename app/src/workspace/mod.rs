@@ -21,6 +21,7 @@ mod project_switcher;
 pub mod project_tab;
 mod registry;
 pub mod rewind_confirmation_dialog;
+pub mod save_policy;
 pub mod sync_inputs;
 pub mod tab_settings;
 pub mod template_sequence;
@@ -84,6 +85,7 @@ pub fn is_feedback_skill_available(ctx: &AppContext) -> bool {
 pub use one_time_modal_model::OneTimeModalModel;
 pub use project_switcher::{ProjectIdentity, ProjectOrigin, ProjectSwitcher};
 pub use registry::WorkspaceRegistry;
+pub use save_policy::PersistedStateMutation;
 pub use toast_stack::ToastStack;
 
 use crate::workspace::view::{
