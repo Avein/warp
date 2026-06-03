@@ -91,10 +91,13 @@ impl SyncDataSource for DataSource {
             .into_iter()
             .filter_map(|workspace_id| {
                 let window_id = registry.window_for_workspace(workspace_id, app)?;
+                let workspace_handle = registry.workspace_handle(workspace_id, app)?;
                 let identity = switcher.identity(workspace_id);
-                let name = identity
-                    .map(|i| i.name.clone())
-                    .unwrap_or_else(|| "project".to_string());
+                // Single source of truth for the workspace label (project-bar pill /
+                // palette / Alt+Tab). The "project" fallback is baked in there.
+                let name = workspace_handle
+                    .as_ref(app)
+                    .display_name(workspace_id, switcher);
                 // Stamped path for projects; fall back to live cwd for plain tabs. Reads from the
                 // workspace itself rather than the window's active session, so a background tab
                 // shows its own directory, not the active one's.

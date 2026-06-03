@@ -928,6 +928,58 @@ pub struct TransferredTab {
     pub draggable_state: DraggableState,
 }
 
+/// Pure resolver for [`Workspace::display_name`], extracted so it can be
+/// unit-tested without standing up a full `Workspace` fixture. Identity name
+/// when the tab is stamped; `"project"` fallback otherwise.
+fn resolve_workspace_display_name(view_id: EntityId, switcher: &ProjectSwitcher) -> String {
+    switcher
+        .identity(view_id)
+        .map(|i| i.name.clone())
+        .unwrap_or_else(|| "project".to_string())
+}
+
+#[cfg(test)]
+mod display_name_tests {
+    use std::path::PathBuf;
+
+    use warpui::EntityId;
+
+    use super::resolve_workspace_display_name;
+    use crate::workspace::{ProjectIdentity, ProjectOrigin, ProjectSwitcher};
+
+    fn id(value: usize) -> EntityId {
+        EntityId::from_usize(value)
+    }
+
+    fn stamp(switcher: &mut ProjectSwitcher, view_id: EntityId, name: &str) {
+        switcher.stamp(
+            view_id,
+            ProjectIdentity {
+                name: name.to_string(),
+                path: PathBuf::from("/tmp"),
+                origin: ProjectOrigin::Config {
+                    config_name: name.to_string(),
+                },
+            },
+        );
+    }
+
+    #[test]
+    fn returns_identity_name_when_stamped() {
+        let mut switcher = ProjectSwitcher::default();
+        stamp(&mut switcher, id(1), "alpha");
+
+        assert_eq!(resolve_workspace_display_name(id(1), &switcher), "alpha");
+    }
+
+    #[test]
+    fn returns_project_fallback_when_unstamped() {
+        let switcher = ProjectSwitcher::default();
+
+        assert_eq!(resolve_workspace_display_name(id(42), &switcher), "project");
+    }
+}
+
 pub struct Workspace {
     window_id: WindowId,
     pub(crate) tabs: Vec<TabData>,
@@ -1113,6 +1165,16 @@ impl Workspace {
     pub(crate) fn set_suppress_detach_panes_on_window_close(&mut self, value: bool) {
         self.suppress_detach_panes_on_window_close = value;
     }
+
+    /// Display name shown on this workspace's project-bar pill, projects-palette
+    /// row, and Alt+Tab row — the single read path for the three surfaces, so
+    /// later slices (`docs/projects-rename.md`) can layer in a per-tab override
+    /// at one location. Resolves to the stamped identity name when present;
+    /// `"project"` fallback for an unstamped (`cmd+n`) tab.
+    pub fn display_name(&self, view_id: EntityId, switcher: &ProjectSwitcher) -> String {
+        resolve_workspace_display_name(view_id, switcher)
+    }
+
     fn tab_rename_editor_font_size(ctx: &AppContext, appearance: &Appearance) -> f32 {
         if FeatureFlag::VerticalTabs.is_enabled() && *TabSettings::as_ref(ctx).use_vertical_tabs {
             match *TabSettings::as_ref(ctx)
@@ -19105,9 +19167,7 @@ impl Workspace {
             let tab_states = states.entry(view_id).or_default().clone();
             let identity = switcher.identity(view_id);
             let component = ProjectTabComponent {
-                label: identity
-                    .map(|i| i.name.clone())
-                    .unwrap_or_else(|| "untitled".to_string()),
+                label: workspace.as_ref(app).display_name(view_id, switcher),
                 origin: identity.map(|i| i.origin.clone()),
                 is_active: Some(view_id) == active_id,
                 is_first: idx == 0,
