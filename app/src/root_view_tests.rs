@@ -4,8 +4,8 @@ use warp_core::user_preferences::GetUserPreferences as _;
 use warpui::{App, AppContext, SingletonEntity};
 
 use super::{
-    has_completed_local_onboarding, persist_project_tab_opened_into_existing_window, RootView,
-    HAS_COMPLETED_ONBOARDING_KEY,
+    has_completed_local_onboarding, persist_project_tab_closed_non_last_in_window,
+    persist_project_tab_opened_into_existing_window, RootView, HAS_COMPLETED_ONBOARDING_KEY,
 };
 use crate::auth::auth_manager::AuthManager;
 use crate::auth::AuthStateProvider;
@@ -134,6 +134,44 @@ fn open_into_existing_window_dispatches_workspace_save_app() {
             *dispatches.lock().expect("mutex should not be poisoned"),
             1,
             "persist_project_tab_opened_into_existing_window must dispatch \
+             workspace:save_app exactly once per call"
+        );
+    });
+}
+
+/// Per-fix targeted test for [`projects-persistence-03`](../../docs/issues/projects-persistence-03-save-on-close-non-last.md):
+/// the bug-fix dispatch helper invoked from `close_workspace`'s non-last
+/// branch (right after `RootView::close_project_tab` returns) must
+/// produce a `workspace:save_app` global action so the snapshot reflects
+/// the now-smaller set of project-tabs before the user `⌘Q`s.
+///
+/// Same sentinel-handler pattern as
+/// `open_into_existing_window_dispatches_workspace_save_app` — the
+/// helper is the unit-testable surface; the link from `close_workspace`
+/// is enforced by Rust's dead-code lint (private fn, single call site).
+#[test]
+fn close_non_last_project_tab_dispatches_workspace_save_app() {
+    App::test((), |mut app| async move {
+        let dispatches: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+
+        let dispatches_for_handler = dispatches.clone();
+        app.update(move |ctx: &mut AppContext| {
+            ctx.add_global_action(
+                "workspace:save_app",
+                move |_: &(), _ctx: &mut AppContext| {
+                    *dispatches_for_handler
+                        .lock()
+                        .expect("mutex should not be poisoned") += 1;
+                },
+            );
+        });
+
+        app.update(persist_project_tab_closed_non_last_in_window);
+
+        assert_eq!(
+            *dispatches.lock().expect("mutex should not be poisoned"),
+            1,
+            "persist_project_tab_closed_non_last_in_window must dispatch \
              workspace:save_app exactly once per call"
         );
     });

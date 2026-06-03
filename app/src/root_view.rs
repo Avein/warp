@@ -809,6 +809,9 @@ fn close_workspace(workspace_id: EntityId, ctx: &mut AppContext) {
     let is_last_tab = registry.workspaces_for_window(window_id, ctx).len() <= 1;
     ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| switcher.forget(workspace_id));
     if is_last_tab {
+        // Last project-tab closes the OS window; the resulting
+        // `on_window_will_close` callback dispatches save via
+        // `PersistedStateMutation::OsWindowClosed`. No extra dispatch here.
         ctx.windows()
             .close_window(window_id, TerminationMode::Cancellable);
     } else {
@@ -818,7 +821,31 @@ fn close_workspace(workspace_id: EntityId, ctx: &mut AppContext) {
                 root_view.close_project_tab(&workspace_id, ctx);
             });
         }
+        persist_project_tab_closed_non_last_in_window(ctx);
     }
+}
+
+/// Persist: [`PersistedStateMutation::ProjectTabClosedNonLastInWindow`].
+///
+/// Dispatched from [`close_workspace`]'s non-last-tab branch immediately
+/// after [`RootView::close_project_tab`] returns. The last-tab branch
+/// closes the host OS window, and the resulting
+/// `on_window_will_close` callback handles the save via
+/// [`PersistedStateMutation::OsWindowClosed`] — so this dispatch is
+/// scoped to the non-last branch only.
+///
+/// Pulled out into a named helper (rather than inlined) for the same
+/// reason as [`persist_project_tab_opened_into_existing_window`]: the
+/// per-fix targeted test in [`root_view_tests`] drives it with a
+/// sentinel `workspace:save_app` handler and asserts the dispatch
+/// without having to spin up a full multi-project-tab OS window in the
+/// harness.
+///
+/// See `docs/projects-persistence.md` → *Implementation Decisions* →
+/// *Bug-fix dispatches* and
+/// [`docs/issues/projects-persistence-03-save-on-close-non-last.md`](../../../docs/issues/projects-persistence-03-save-on-close-non-last.md).
+fn persist_project_tab_closed_non_last_in_window(ctx: &mut AppContext) {
+    ctx.dispatch_global_action("workspace:save_app", &());
 }
 
 /// Returns the user's home directory, falling back to the filesystem root if it can't be resolved.

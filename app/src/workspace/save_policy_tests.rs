@@ -96,27 +96,15 @@ fn variant_index(variant: &PersistedStateMutation) -> usize {
     }
 }
 
-/// The remaining gap-fix variants still carry their `pending: …`
-/// placeholder labels until their bug-fix slices land. Slice #02 has
-/// landed (`ProjectTabOpenedInExistingWindow`), so it no longer appears
-/// here; #03 and #04 are still pending.
+/// The remaining gap-fix variant still carries its `pending: …`
+/// placeholder label until its bug-fix slice lands. Slices #02 and #03
+/// have landed; only `AppWillTerminate` (slice #04) is still pending.
 #[test]
-fn remaining_gap_fix_variants_still_carry_pending_labels() {
-    for (variant, expected) in [
-        (
-            PersistedStateMutation::ProjectTabClosedNonLastInWindow,
-            "pending: projects-persistence-03",
-        ),
-        (
-            PersistedStateMutation::AppWillTerminate,
-            "pending: projects-persistence-04",
-        ),
-    ] {
-        assert_eq!(
-            variant.dispatch_site(),
-            expected,
-            "{variant:?} should still carry its placeholder label \
-             until its bug-fix slice lands"
-        );
-    }
+fn app_will_terminate_still_carries_pending_label() {
+    assert_eq!(
+        PersistedStateMutation::AppWillTerminate.dispatch_site(),
+        "pending: projects-persistence-04",
+        "AppWillTerminate should still carry its placeholder label \
+         until projects-persistence-04 lands"
+    );
 }

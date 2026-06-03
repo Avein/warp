@@ -151,7 +151,10 @@ impl PersistedStateMutation {
                 "root_view::persist_project_tab_opened_into_existing_window \
                  (called from focus_or_spawn_project)"
             }
-            Self::ProjectTabClosedNonLastInWindow => "pending: projects-persistence-03",
+            Self::ProjectTabClosedNonLastInWindow => {
+                "root_view::persist_project_tab_closed_non_last_in_window \
+                 (called from close_workspace)"
+            }
             Self::ProjectTabRenamed => "workspace::view::Workspace::finish_project_tab_rename",
             Self::NewOsWindowOpened => {
                 "lib::on_new_window_requested + app_menus::{dock_menu, open_new_window} + launch-config menu items"
