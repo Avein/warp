@@ -927,6 +927,7 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
                     .project_identity
                     .as_ref()
                     .and_then(|identity| serde_json::to_string(identity).ok()),
+                display_name_override: window.display_name_override.clone(),
             };
             diesel::insert_into(schema::windows::dsl::windows)
                 .values(new_window)
@@ -2866,6 +2867,7 @@ fn read_sqlite_data(
                 project_identity: window
                     .project_identity
                     .and_then(|s| serde_json::from_str(&s).ok()),
+                display_name_override: window.display_name_override,
             }
         })
         .collect();

@@ -448,6 +448,7 @@ diesel::table! {
         left_panel_open -> Nullable<Bool>,
         vertical_tabs_panel_open -> Nullable<Bool>,
         project_identity -> Nullable<Text>,
+        display_name_override -> Nullable<Text>,
     }
 }
 

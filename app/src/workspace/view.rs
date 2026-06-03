@@ -3370,11 +3370,15 @@ impl Workspace {
             pane_rename_editor: Self::pane_rename_editor(ctx),
             project_tab_rename_editor: Self::project_tab_rename_editor(ctx),
             project_tab_rename_target: None,
-            // The persistence layer wires this from `WindowSnapshot` in #03.
-            // For now every freshly-constructed workspace starts overrideless;
-            // the override is set at runtime via F2 / double-click and lost on
-            // tab close. (See `docs/projects-rename.md`.)
-            display_name_override: None,
+            // Hydrated from `WindowSnapshot` on restore; `None` for a freshly
+            // spawned tab. The override is workspace-scoped — closing the tab
+            // drops it (see `docs/projects-rename.md`).
+            display_name_override: match &workspace_setting {
+                NewWorkspaceSource::Restored {
+                    window_snapshot, ..
+                } => window_snapshot.display_name_override.clone(),
+                _ => None,
+            },
             vertical_tabs_search_input: Self::vertical_tabs_search_input(ctx),
             tips_completed,
             user_default_shell_unsupported_banner_model_handle,
@@ -10491,6 +10495,7 @@ impl Workspace {
             right_panel_width,
             agent_management_filters,
             project_identity,
+            display_name_override: self.display_name_override.clone(),
         }
     }
 

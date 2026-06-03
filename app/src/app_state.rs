@@ -59,6 +59,10 @@ pub struct WindowSnapshot {
     /// Identity of the project this window represents, if it is a project window. Persisted so
     /// restored windows keep their project name/origin across restarts (see [`ProjectIdentity`]).
     pub project_identity: Option<ProjectIdentity>,
+    /// User-typed override for the project-tab's pill label. `None` means the
+    /// pill shows the identity-derived name. Workspace-scoped: when the tab is
+    /// closed, this disappears with it (per `docs/projects-rename.md`).
+    pub display_name_override: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

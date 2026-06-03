@@ -295,6 +295,7 @@ fn test_terminal_window_snapshot(vertical_tabs_panel_open: bool) -> WindowSnapsh
         right_panel_width: None,
         agent_management_filters: None,
         project_identity: None,
+        display_name_override: None,
     }
 }
 
@@ -366,6 +367,10 @@ fn test_sqlite_round_trips_project_identity() {
             template_name: "default".to_string(),
         },
     });
+    // The Template tab also carries a per-tab display-name override; this
+    // round-trips alongside the identity so a relaunched session shows the
+    // renamed pill (see `docs/projects-rename.md`).
+    template_window.display_name_override = Some("api-prod".to_string());
     // A plain (`cmd+n`) window has no stamped identity.
     let mut plain_window = test_terminal_window_snapshot(false);
     set_uuid(&mut plain_window, 12);
@@ -406,6 +411,14 @@ fn test_sqlite_round_trips_project_identity() {
             }),
             None,
         ]
+    );
+    assert_eq!(
+        restored
+            .windows
+            .iter()
+            .map(|window| window.display_name_override.clone())
+            .collect::<Vec<_>>(),
+        vec![None, Some("api-prod".to_string()), None]
     );
 }
 
@@ -457,6 +470,7 @@ fn test_sqlite_round_trips_custom_vertical_tabs_title() {
             right_panel_width: None,
             agent_management_filters: None,
             project_identity: None,
+            display_name_override: None,
         }],
         active_window_index: Some(0),
         block_lists: Default::default(),
@@ -532,6 +546,7 @@ fn test_sqlite_round_trips_code_pane_with_multiple_tabs() {
             right_panel_width: None,
             agent_management_filters: None,
             project_identity: None,
+            display_name_override: None,
         }],
         active_window_index: Some(0),
         block_lists: Default::default(),
