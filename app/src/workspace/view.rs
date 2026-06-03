@@ -1662,22 +1662,27 @@ impl Workspace {
     /// Commit path: reads the editor's buffer, trims, sets the override (or
     /// clears it when empty), kicks a save, and closes the editor. The
     /// buffer-to-override mapping is the pure-tested [`override_from_buffer`].
+    ///
+    /// Both trigger paths (F2 and the `root_view:rename_project_tab` global
+    /// action fired by double-click) land here on the same workspace whose
+    /// pill is being edited — the editor lives on `self`, and `start_…`
+    /// stamps the target with `ctx.view_id()` (= `self`'s view id). So we
+    /// write the override on `self` directly rather than re-entering through
+    /// the registry's handle (which would be a reentrant `ViewHandle::update`
+    /// on the very view we're already inside).
     fn finish_project_tab_rename(&mut self, ctx: &mut ViewContext<Self>) {
-        let Some(target) = self.project_tab_rename_target.take() else {
+        if self.project_tab_rename_target.take().is_none() {
             return;
-        };
+        }
         let buffer = self.project_tab_rename_editor.as_ref(ctx).buffer_text(ctx);
         let new_override = override_from_buffer(&buffer);
-        let registry = WorkspaceRegistry::as_ref(ctx);
-        let target_handle = registry.workspace_handle(target, ctx);
+        // Apply the override *before* clearing/blurring the editor so the
+        // Blurred event the focus-shift fires can early-return (target is
+        // None now) without racing the override write.
+        self.set_display_name_override(new_override, ctx);
         self.clear_project_tab_rename_editor(ctx);
         self.focus_active_tab(ctx);
-        if let Some(handle) = target_handle {
-            handle.update(ctx, |workspace, ctx| {
-                workspace.set_display_name_override(new_override, ctx);
-            });
-            ctx.dispatch_global_action("workspace:save_app", ());
-        }
+        ctx.dispatch_global_action("workspace:save_app", ());
         ctx.notify();
     }
 

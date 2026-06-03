@@ -11,12 +11,12 @@
 
 use warp_core::ui::theme::color::internal_colors;
 use warpui::elements::{
-    Align, Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Fill, Flex,
-    Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius, Text,
+    Border, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Fill, Flex, Hoverable,
+    MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius, Text,
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::platform::Cursor;
-use warpui::ui_components::components::{UiComponent, UiComponentStyles};
+use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::ui_components::text_input::TextInput;
 use warpui::{Element, EntityId, ViewHandle, WindowId};
 
@@ -29,6 +29,14 @@ use crate::workspace::ProjectOrigin;
 
 /// 13pt — matches the default `ui_font_size` used by session tabs.
 pub const PROJECT_TAB_LABEL_FONT_SIZE: f32 = 13.;
+
+/// Max width of the inline rename editor field inside a pill. Wide enough for
+/// typical project names (≈18 chars at 13pt), narrow enough that the editor +
+/// icon stay visually centered inside a normal-width pill via the parent
+/// `Flex`'s `MainAxisAlignment::Center`. See `ProjectTabComponent::render` for
+/// why a bounded width matters (avoids the editor element's infinite-width
+/// panic in `editor/view/element.rs:1659`).
+const PROJECT_TAB_EDITOR_MAX_WIDTH: f32 = 140.;
 
 /// 15% accent opacity (38 / 255 ≈ 0.149) — loud enough to read as a "selected" pill, quiet
 /// enough not to overpower an active session tab below.
@@ -111,8 +119,26 @@ impl<'a> ProjectTabComponent<'a> {
                     // Outer pill chrome (icon, border, active tint) stays untouched per
                     // `docs/projects-rename.md`. Transparent background and zero radius/border
                     // keep the editor visually flush with the pill it replaces.
+                    //
+                    // Width plumbing — three things have to hold simultaneously:
+                    //
+                    // - The editor element panics on an infinite-width constraint
+                    //   (`editor/view/element.rs:1659`), so SOMETHING above it must give it a
+                    //   bounded max width.
+                    // - We want the icon + editor to stay *centered as a group* (like the
+                    //   inactive icon + label combo). A `Shrinkable(1.0, …)` would make the
+                    //   editor greedy and push the icon to the left edge.
+                    // - The editor needs enough room for a reasonable name length.
+                    //
+                    // `ConstrainedBox::with_max_width(PROJECT_TAB_EDITOR_MAX_WIDTH)` solves all
+                    // three: gives the editor a bounded width, leaves the icon next to it for
+                    // the Flex's `MainAxisAlignment::Center` to center together, and is wide
+                    // enough for typical names.
+                    //
+                    // 8pt top margin is the same offset session-tab rename uses to optically
+                    // center the editor in a 34pt tab bar — see `tab.rs::render_tab_content`.
                     inner.add_child(
-                        Align::new(
+                        ConstrainedBox::new(
                             TextInput::new(
                                 editor,
                                 UiComponentStyles::default()
@@ -120,9 +146,14 @@ impl<'a> ProjectTabComponent<'a> {
                                     .set_border_radius(CornerRadius::with_all(Radius::Pixels(0.)))
                                     .set_border_width(0.),
                             )
+                            .with_style(UiComponentStyles {
+                                margin: Some(Coords::default().top(8.)),
+                                ..Default::default()
+                            })
                             .build()
                             .finish(),
                         )
+                        .with_max_width(PROJECT_TAB_EDITOR_MAX_WIDTH)
                         .finish(),
                     );
                 } else {
