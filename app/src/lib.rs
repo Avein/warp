@@ -2067,6 +2067,21 @@ pub(crate) fn app_callbacks(is_integration_test: bool) -> warpui::platform::AppC
             );
         })),
         on_will_terminate: Some(Box::new(move |ctx| {
+            // Persist: PersistedStateMutation::AppWillTerminate.
+            //
+            // Final save before `PersistenceWriter::terminate()` joins the
+            // writer thread. Dispatched FIRST so the resulting
+            // `ModelEvent::Snapshot` is enqueued before `ModelEvent::Terminate`
+            // on the shared MPSC; the writer's sequential drain processes the
+            // snapshot, then exits. `terminate()` `join()`s the thread so the
+            // calling thread blocks until the SQL work completes.
+            //
+            // `on_window_will_close`'s `if stage() == Terminating { return }`
+            // short-circuit stays in place — removing it risks reintroducing
+            // the double-save-during-quit problem the guard was added to
+            // prevent (see PRD `projects-persistence.md` *Out of Scope*).
+            persist_app_will_terminate(ctx);
+
             NotebookManager::handle(ctx).update(ctx, |manager, ctx| {
                 // Notebooks are only saved periodically, so ensure that any pending changes have
                 // been sent to the writer thread before terminating.
@@ -2317,6 +2332,38 @@ pub(crate) fn app_callbacks(is_integration_test: bool) -> warpui::platform::AppC
 
 /// Focuses the active window or if there isn't one then a window with a running process
 /// and then shows the native modal.
+/// Persist: [`crate::workspace::PersistedStateMutation::AppWillTerminate`].
+///
+/// Final save dispatched from the top of `on_will_terminate` before
+/// `PersistenceWriter::terminate()` joins the writer thread. Pulled out
+/// into a named helper for two reasons:
+///
+/// 1. The per-fix targeted test
+///    `app_will_terminate_dispatches_workspace_save_app` drives the helper
+///    with a sentinel `workspace:save_app` handler and asserts the dispatch
+///    happens — without standing up a full app + sqlite writer thread in
+///    the test harness.
+/// 2. The on_will_terminate callback body is long, and naming the
+///    dispatch keeps the "save FIRST, terminate LATER" ordering invariant
+///    obvious to readers (and to the `PersistedStateMutation` audit
+///    table).
+///
+/// Channel-level ordering rationale: `save_app` enqueues
+/// `ModelEvent::Snapshot(state)` on the same MPSC that
+/// `PersistenceWriter::terminate()` enqueues `ModelEvent::Terminate` on,
+/// and the writer thread drains the channel sequentially before exiting.
+/// Calling this helper before `PersistenceWriter::terminate()` therefore
+/// guarantees the snapshot reaches disk before the writer shuts down.
+/// `terminate()` joins the writer thread, so the calling thread blocks
+/// until the snapshot's SQL work completes.
+///
+/// See `docs/projects-persistence.md` → *Implementation Decisions* →
+/// *`on_will_terminate` ordering* and
+/// [`docs/issues/projects-persistence-04-save-on-app-terminate.md`](../../docs/issues/projects-persistence-04-save-on-app-terminate.md).
+fn persist_app_will_terminate(ctx: &mut AppContext) {
+    ctx.dispatch_global_action("workspace:save_app", &());
+}
+
 fn focus_running_window_and_show_native_modal(
     sessions_summary: RunningSessionSummary,
     dialog_with_callbacks: AlertDialogWithCallbacks<AppModalCallback>,
@@ -2546,4 +2593,56 @@ fn launch(ctx: &mut warpui::AppContext, app_state: Option<AppState>, launch_mode
 fn init_logging_for_unit_tests_glue() {
     // Initialize terminal-friendly logging for tests from the shared logger crate.
     warp_logging::init_logging_for_unit_tests();
+}
+
+#[cfg(test)]
+mod app_lifecycle_tests {
+    use std::sync::{Arc, Mutex};
+
+    use warpui::{App, AppContext};
+
+    use super::persist_app_will_terminate;
+
+    /// Per-fix targeted test for [`projects-persistence-04`](../../docs/issues/projects-persistence-04-save-on-app-terminate.md):
+    /// the bug-fix dispatch helper invoked from the top of
+    /// `on_will_terminate` (before `PersistenceWriter::terminate()`) must
+    /// produce a `workspace:save_app` global action so the final snapshot
+    /// reaches the writer thread before `ModelEvent::Terminate` does.
+    ///
+    /// We test the helper directly with a sentinel `workspace:save_app`
+    /// handler rather than spinning up the full app + writer thread + MPSC
+    /// drain in the harness: the helper owns the dispatch, the
+    /// callback-body execution order in `lib::on_will_terminate` enforces
+    /// "save first, terminate second" (Rust sequential semantics), and
+    /// the writer's FIFO MPSC drain is what guarantees `Snapshot` is
+    /// processed before `Terminate`. The end-to-end "rename → ⌘Q →
+    /// relaunch → rename survives" smoke is the user's manual repro.
+    #[test]
+    fn app_will_terminate_dispatches_workspace_save_app() {
+        App::test((), |mut app| async move {
+            let dispatches: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+
+            let dispatches_for_handler = dispatches.clone();
+            app.update(move |ctx: &mut AppContext| {
+                ctx.add_global_action(
+                    "workspace:save_app",
+                    move |_: &(), _ctx: &mut AppContext| {
+                        *dispatches_for_handler
+                            .lock()
+                            .expect("mutex should not be poisoned") += 1;
+                    },
+                );
+            });
+
+            app.update(persist_app_will_terminate);
+
+            assert_eq!(
+                *dispatches.lock().expect("mutex should not be poisoned"),
+                1,
+                "persist_app_will_terminate must dispatch workspace:save_app \
+                 exactly once per call (the writer drains the resulting \
+                 ModelEvent::Snapshot before processing ModelEvent::Terminate)"
+            );
+        });
+    }
 }

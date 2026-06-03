@@ -96,15 +96,20 @@ fn variant_index(variant: &PersistedStateMutation) -> usize {
     }
 }
 
-/// The remaining gap-fix variant still carries its `pending: …`
-/// placeholder label until its bug-fix slice lands. Slices #02 and #03
-/// have landed; only `AppWillTerminate` (slice #04) is still pending.
+/// Asserts no variant still carries a `pending: …` placeholder label —
+/// the slice-01 placeholder convention only existed for the three
+/// gap-fix variants while their bug-fix slices were in flight. By #04
+/// all real dispatch sites are wired, so this test enforces "no
+/// variant is left half-done" going forward.
 #[test]
-fn app_will_terminate_still_carries_pending_label() {
-    assert_eq!(
-        PersistedStateMutation::AppWillTerminate.dispatch_site(),
-        "pending: projects-persistence-04",
-        "AppWillTerminate should still carry its placeholder label \
-         until projects-persistence-04 lands"
-    );
+fn no_variant_carries_a_pending_placeholder_label() {
+    for variant in PersistedStateMutation::ALL {
+        assert!(
+            !variant.dispatch_site().starts_with("pending:"),
+            "PersistedStateMutation::{variant:?} still carries a pending \
+             placeholder ({:?}); the bug-fix slice that owns this variant \
+             must replace the placeholder with the real call-site label",
+            variant.dispatch_site(),
+        );
+    }
 }

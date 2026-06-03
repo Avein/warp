@@ -162,7 +162,9 @@ impl PersistedStateMutation {
             Self::OsWindowClosed => "lib::on_window_will_close (non-terminating)",
             Self::ActiveOsWindowChanged => "lib::on_active_window_changed",
             Self::OsWindowMovedOrResized => "lib::on_window_moved + lib::on_window_resized",
-            Self::AppWillTerminate => "pending: projects-persistence-04",
+            Self::AppWillTerminate => {
+                "lib::persist_app_will_terminate (called from on_will_terminate)"
+            }
             Self::WorkspaceActionRequiringSave => {
                 "workspace::view::Workspace::handle_action (should_save_app_state_on_action() == true)"
             }
