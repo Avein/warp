@@ -1173,10 +1173,16 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                     view
                 });
             } else if !normal_windows.is_empty() {
-                // Restore the previously-active project as the host window's active tab, then append
-                // the remaining projects as project-tabs (in original order) inside the same window.
+                // Open the OS window with the previously-active workspace's bounds/fullscreen
+                // (where the user was last working) but seed it with `normal_windows[0]` so the
+                // project-tab strip starts in *saved* order. Append the rest of the strip in
+                // saved order, then activate `host_pos` independently. Without this separation
+                // the active-at-quit tab always landed at strip index 0 on restore (because
+                // `WorkspaceRegistry::register` makes the first registered workspace active),
+                // and the strip silently rotated on every active-tab-change-then-quit cycle.
                 let host_pos = active_normal_pos.unwrap_or(0);
                 let host_snapshot = normal_windows[host_pos];
+                let first_snapshot = normal_windows[0];
                 let (_, host_root_view) = ctx.add_window(
                     AddWindowOptions {
                         window_bounds: WindowBounds::new(host_snapshot.bounds),
@@ -1191,7 +1197,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                         let mut view = RootView::new(
                             global_resource_handles.clone(),
                             NewWorkspaceSource::Restored {
-                                window_snapshot: host_snapshot.clone(),
+                                window_snapshot: first_snapshot.clone(),
                                 block_lists: app_state.block_lists.clone(),
                             },
                             ctx,
@@ -1201,14 +1207,27 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                     },
                 );
 
-                for (pos, window) in normal_windows.iter().enumerate() {
-                    if pos == host_pos {
-                        continue;
-                    }
+                for window in normal_windows.iter().skip(1) {
                     let window_snapshot = (*window).clone();
                     let block_lists = app_state.block_lists.clone();
                     host_root_view.update(ctx, |root_view, ctx| {
                         root_view.restore_project_tab(window_snapshot, block_lists, ctx);
+                    });
+                }
+
+                // `WorkspaceRegistry::register` marks the first registered workspace as active —
+                // that's `normal_windows[0]` per the seed above. When the user's previously-active
+                // tab was at a different index, re-activate it now that the strip is populated.
+                if host_pos != 0 {
+                    host_root_view.update(ctx, |root_view, ctx| {
+                        let window_id = ctx.window_id();
+                        let host_workspace_id = WorkspaceRegistry::as_ref(ctx)
+                            .workspaces_for_window(window_id, ctx)
+                            .get(host_pos)
+                            .map(|w| w.id());
+                        if let Some(host_id) = host_workspace_id {
+                            root_view.activate_project_tab(&host_id, ctx);
+                        }
                     });
                 }
             }
