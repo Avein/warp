@@ -422,6 +422,116 @@ fn test_sqlite_round_trips_project_identity() {
     );
 }
 
+/// Integration smoke for `projects-persistence-02`
+/// ([`docs/issues/projects-persistence-02-save-on-open-into-window.md`](../../../docs/issues/projects-persistence-02-save-on-open-into-window.md)).
+///
+/// Models the on-disk shape `get_app_state` produces after the bug-fix
+/// dispatches save on opening a project-tab into an existing OS window:
+/// a synthetic-root workspace plus a freshly-opened template-origin
+/// project-tab, both rooted in the same OS window in the user's mental
+/// model but persisted as **two `WindowSnapshot` rows** (one per
+/// workspace — see the comment in `app_state::get_app_state`).
+///
+/// Asserts the multi-snapshot AppState round-trips through
+/// `save_app_state` → `read_sqlite_data` with order, identities, and the
+/// active-window index intact. This is the contract the user repro
+/// ("launch → open project → ⌘Q → relaunch → project-tab is back")
+/// ultimately depends on; landing this guard means a future regression
+/// in `save_app_state`/`read_sqlite_data`'s multi-workspace shape fails
+/// at test time rather than as a silently-lost tab.
+#[test]
+fn test_sqlite_round_trips_project_tab_opened_into_existing_window() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("warp.sqlite");
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+
+    // Terminal pane uuids must be unique across windows (DB constraint), so stamp each distinctly.
+    fn set_uuid(window: &mut WindowSnapshot, uuid: u8) {
+        if let PaneNodeSnapshot::Leaf(LeafSnapshot {
+            contents: LeafContents::Terminal(terminal),
+            ..
+        }) = &mut window.tabs[0].root
+        {
+            terminal.uuid = vec![uuid];
+        }
+    }
+
+    // First snapshot: the synthetic startup root that `spawn_synthetic_root`
+    // would produce on a fresh launch.
+    let mut root_window = test_terminal_window_snapshot(false);
+    set_uuid(&mut root_window, 20);
+    root_window.project_identity = Some(ProjectIdentity {
+        name: "root".to_string(),
+        path: PathBuf::from("/Users/me"),
+        origin: ProjectOrigin::Config {
+            config_name: "root".to_string(),
+        },
+    });
+
+    // Second snapshot: a project-tab opened via the projects palette /
+    // `⌘⇧N` new-project popup / `newds`. After the fix in #02 lands,
+    // `focus_or_spawn_project` dispatches `workspace:save_app` right after
+    // `RootView::open_project_tab` returns, so a snapshot like this one
+    // reaches disk before the user can `⌘Q`.
+    let mut opened_project_window = test_terminal_window_snapshot(false);
+    set_uuid(&mut opened_project_window, 21);
+    opened_project_window.project_identity = Some(ProjectIdentity {
+        name: "default-1".to_string(),
+        path: PathBuf::from("/Users/me/checkout/api"),
+        origin: ProjectOrigin::Template {
+            template_name: "default".to_string(),
+        },
+    });
+
+    let app_state = AppState {
+        windows: vec![root_window, opened_project_window],
+        // Active = the newly-opened project-tab (matches focus_or_spawn_project's
+        // `show_window_and_focus_app` behaviour).
+        active_window_index: Some(1),
+        block_lists: Default::default(),
+        running_mcp_servers: Default::default(),
+    };
+
+    save_app_state(&mut conn, &app_state).expect("app state should save");
+
+    let restored = read_sqlite_data(&mut conn, None)
+        .expect("app state should load")
+        .app_state;
+
+    assert_eq!(
+        restored.windows.len(),
+        2,
+        "both the synthetic root and the newly-opened project-tab should survive the round trip"
+    );
+    assert_eq!(restored.active_window_index, Some(1));
+    assert_eq!(
+        restored
+            .windows
+            .iter()
+            .map(|window| window.project_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            Some(ProjectIdentity {
+                name: "root".to_string(),
+                path: PathBuf::from("/Users/me"),
+                origin: ProjectOrigin::Config {
+                    config_name: "root".to_string(),
+                },
+            }),
+            Some(ProjectIdentity {
+                name: "default-1".to_string(),
+                path: PathBuf::from("/Users/me/checkout/api"),
+                origin: ProjectOrigin::Template {
+                    template_name: "default".to_string(),
+                },
+            }),
+        ],
+        "project identities should round-trip in declaration order \
+         (root first, opened project second) so the post-restore project bar \
+         matches the pre-quit ordering"
+    );
+}
+
 #[test]
 fn test_sqlite_round_trips_custom_vertical_tabs_title() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");

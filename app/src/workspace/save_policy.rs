@@ -147,7 +147,10 @@ impl PersistedStateMutation {
         // fails compilation, forcing the contributor to think about which
         // call site owns the dispatch.
         match self {
-            Self::ProjectTabOpenedInExistingWindow => "pending: projects-persistence-02",
+            Self::ProjectTabOpenedInExistingWindow => {
+                "root_view::persist_project_tab_opened_into_existing_window \
+                 (called from focus_or_spawn_project)"
+            }
             Self::ProjectTabClosedNonLastInWindow => "pending: projects-persistence-03",
             Self::ProjectTabRenamed => "workspace::view::Workspace::finish_project_tab_rename",
             Self::NewOsWindowOpened => {

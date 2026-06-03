@@ -739,11 +739,14 @@ fn focus_or_spawn_project(arg: &FocusOrSpawnProjectArg, ctx: &mut AppContext) {
                 root_view.open_project_tab(window_template, identity, ctx);
             });
             ctx.windows().show_window_and_focus_app(window_id);
+            persist_project_tab_opened_into_existing_window(ctx);
             return;
         }
     }
 
     // No active window to host the tab: spawn a fresh window and stamp its active workspace.
+    // The save dispatch on this branch is already covered by `on_new_window_requested`'s
+    // `PersistedStateMutation::NewOsWindowOpened` save — no extra dispatch needed here.
     let (window_id, _) =
         open_new_with_workspace_source(NewWorkspaceSource::FromTemplate { window_template }, ctx);
     if let Some(workspace_id) = WorkspaceRegistry::as_ref(ctx).active_id(window_id) {
@@ -751,6 +754,32 @@ fn focus_or_spawn_project(arg: &FocusOrSpawnProjectArg, ctx: &mut AppContext) {
             switcher.stamp(workspace_id, identity);
         });
     }
+}
+
+/// Persist: [`PersistedStateMutation::ProjectTabOpenedInExistingWindow`].
+///
+/// Dispatched from [`focus_or_spawn_project`] immediately after
+/// [`RootView::open_project_tab`] returns on the active-window branch, so a
+/// project-tab opened via the projects palette / `⌘⇧N` new-project popup /
+/// `newds` / `warp://` survives `⌘Q` without needing an incidental window
+/// move/resize to flush the snapshot.
+///
+/// Scoped to the active-window branch deliberately: the "no active window →
+/// `open_new_with_workspace_source`" fallback is already covered by
+/// `on_new_window_requested`'s [`PersistedStateMutation::NewOsWindowOpened`]
+/// save dispatch.
+///
+/// Pulled out into a named helper (rather than an inline
+/// `ctx.dispatch_global_action("workspace:save_app", ())`) so the per-fix
+/// targeted test in [`root_view_tests`] can drive it with a sentinel
+/// `workspace:save_app` handler and assert the dispatch happens without
+/// having to build a full `RootView`-hosting OS window in the test harness.
+///
+/// See `docs/projects-persistence.md` → *Implementation Decisions* →
+/// *Bug-fix dispatches* and
+/// [`docs/issues/projects-persistence-02-save-on-open-into-window.md`](../../../docs/issues/projects-persistence-02-save-on-open-into-window.md).
+fn persist_project_tab_opened_into_existing_window(ctx: &mut AppContext) {
+    ctx.dispatch_global_action("workspace:save_app", &());
 }
 
 /// Focuses an already-open project-tab (workspace): activates it in its host window, brings that

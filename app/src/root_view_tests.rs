@@ -1,7 +1,12 @@
-use warp_core::user_preferences::GetUserPreferences as _;
-use warpui::{App, SingletonEntity};
+use std::sync::{Arc, Mutex};
 
-use super::{has_completed_local_onboarding, RootView, HAS_COMPLETED_ONBOARDING_KEY};
+use warp_core::user_preferences::GetUserPreferences as _;
+use warpui::{App, AppContext, SingletonEntity};
+
+use super::{
+    has_completed_local_onboarding, persist_project_tab_opened_into_existing_window, RootView,
+    HAS_COMPLETED_ONBOARDING_KEY,
+};
 use crate::auth::auth_manager::AuthManager;
 use crate::auth::AuthStateProvider;
 use crate::server::server_api::ServerApiProvider;
@@ -87,6 +92,50 @@ fn test_sync_noop_when_local_onboarding_not_completed() {
                 "sync should not have changed is_onboarded when local onboarding is incomplete"
             );
         });
+    });
+}
+
+/// Per-fix targeted test for [`projects-persistence-02`](../../docs/issues/projects-persistence-02-save-on-open-into-window.md):
+/// the bug-fix dispatch helper invoked from `focus_or_spawn_project`
+/// (right after `RootView::open_project_tab` returns on the active-window
+/// branch) must produce a `workspace:save_app` global action so the writer
+/// thread picks the project-tab up before the user `⌘Q`s.
+///
+/// We test the helper directly with a sentinel `workspace:save_app`
+/// handler rather than driving `root_view:focus_or_spawn_project`
+/// end-to-end: the latter would require a full `RootView`-hosting OS
+/// window plus the workspace/registry/switcher singleton ladder, while
+/// the helper is what actually owns the dispatch and is the only call
+/// site `focus_or_spawn_project` reaches for this code path (private
+/// `fn` in the same module — `cargo`'s dead-code lint enforces the link).
+#[test]
+fn open_into_existing_window_dispatches_workspace_save_app() {
+    App::test((), |mut app| async move {
+        let dispatches: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+
+        let dispatches_for_handler = dispatches.clone();
+        app.update(move |ctx: &mut AppContext| {
+            // Sentinel handler: counts every `workspace:save_app` dispatch.
+            // Global actions chain (`add_global_action` appends), so this
+            // composes cleanly with whatever the real handler would do.
+            ctx.add_global_action(
+                "workspace:save_app",
+                move |_: &(), _ctx: &mut AppContext| {
+                    *dispatches_for_handler
+                        .lock()
+                        .expect("mutex should not be poisoned") += 1;
+                },
+            );
+        });
+
+        app.update(persist_project_tab_opened_into_existing_window);
+
+        assert_eq!(
+            *dispatches.lock().expect("mutex should not be poisoned"),
+            1,
+            "persist_project_tab_opened_into_existing_window must dispatch \
+             workspace:save_app exactly once per call"
+        );
     });
 }
 
