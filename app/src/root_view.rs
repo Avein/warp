@@ -1144,9 +1144,20 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                 }
             }
 
-            if normal_windows.is_empty() {
+            if normal_windows.is_empty() && !app_state.windows.is_empty() {
                 // Only the quake-mode window was restored (it starts hidden); create a visible
                 // normal window so something shows on startup.
+                //
+                // The `!app_state.windows.is_empty()` guard scopes this fallback to its original
+                // intent — at least one window was persisted but all of them were quake. When
+                // `app_state.windows` is fully empty (first launch, post-state-wipe, or an empty
+                // persisted snapshot), we deliberately create nothing here and let `launch()`'s
+                // `root_view:spawn_synthetic_root` dispatch own the empty-state path. Without
+                // this guard, this branch would create a plain `Empty` window with no
+                // `project_identity`, `launch()`'s `ctx.window_ids().count() == 0` check would
+                // see the window and skip the synthetic-root spawn, and the user would land on a
+                // blank `project`-labelled pill on every fresh launch (see
+                // `feat(projects-origin): synthetic root auto-spawn` for the launch-time pairing).
                 let window_settings = WindowSettings::as_ref(ctx);
                 let options = default_window_options(window_settings, ctx);
                 ctx.add_window(options, |ctx| {
@@ -1161,7 +1172,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                     view.focus(ctx);
                     view
                 });
-            } else {
+            } else if !normal_windows.is_empty() {
                 // Restore the previously-active project as the host window's active tab, then append
                 // the remaining projects as project-tabs (in original order) inside the same window.
                 let host_pos = active_normal_pos.unwrap_or(0);
