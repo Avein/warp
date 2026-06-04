@@ -2038,8 +2038,21 @@ pub struct RootView {
     paste_auth_token_modal: Option<ViewHandle<PasteAuthTokenModalView>>,
     /// Strong handles to every project-tab workspace hosted in this window. The registry only holds
     /// weak handles, and `Terminal(handle)` only keeps the *active* one alive — so without this the
-    /// previously-active workspace would be deallocated the moment we switch tabs. Tracked lazily in
-    /// `render` (hence `RefCell`) so it also captures workspaces created via the auth/onboarding path.
+    /// previously-active workspace would be deallocated the moment we switch tabs.
+    ///
+    /// The seed workspace (the one `Self::new` constructs when the user is already logged in) is
+    /// pushed here eagerly during construction, BEFORE any render fires. That eager push is what
+    /// makes restore-with-N-tabs safe: `open_from_restored` synchronously calls `restore_project_tab`
+    /// for each persisted tab and then `activate_project_tab` for the host position, both of which
+    /// overwrite `auth_onboarding_state`; without the eager seed the first tab (`first_snapshot`,
+    /// the leftmost in the strip) would be dropped before the lazy render-time capture had a chance
+    /// to run, and the strip would silently lose its leading tab on every restart whose
+    /// last-active position wasn't 0.
+    ///
+    /// Workspaces created later — via `open_project_tab` (palette spawn) or the auth/onboarding
+    /// path that transitions `Auth → Terminal` after `Self::new` returns — are tracked by their own
+    /// dispatchers (`open_project_tab` pushes directly) and by the idempotent lazy capture in
+    /// `render` (hence `RefCell`) which catches anything the explicit paths miss.
     project_workspaces: RefCell<Vec<ViewHandle<Workspace>>>,
     /// The `cmd-shift-n` path input popup for opening a new ad-hoc project-tab. Overlaid on this
     /// window while open (see [`Self::show_new_project_popup`]).
@@ -2134,6 +2147,13 @@ impl RootView {
             view
         };
 
+        // Seed `project_workspaces` with the initial Terminal workspace, if we have one. See the
+        // field doc on `project_workspaces` for why this can't wait for render's lazy capture.
+        let initial_project_workspaces = match &auth_onboarding_state {
+            AuthOnboardingState::Terminal(workspace) => vec![workspace.clone()],
+            _ => Vec::new(),
+        };
+
         let root_view = Self {
             auth_onboarding_state,
             server_time: None,
@@ -2149,7 +2169,7 @@ impl RootView {
             pending_tutorial: None,
             pending_post_auth_onboarding_settings: None,
             paste_auth_token_modal: None,
-            project_workspaces: RefCell::new(Vec::new()),
+            project_workspaces: RefCell::new(initial_project_workspaces),
             new_project_popup,
         };
 
