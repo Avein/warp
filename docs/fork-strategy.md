@@ -158,9 +158,9 @@ API is preferred for all *other* call sites that happen to fit it.
 ## 4. Cadence tiers
 
 The cost of catching up scales non-linearly with the gap since the
-last successful sync. The cadence-tier function (Slice 03, lives at
-`crates/fork_tools/src/cadence.rs` or `scripts/lib/cadence.sh` —
-implementation choice per Slice 03) classifies the upcoming sync:
+last successful sync. The cadence-tier function lives at
+`scripts/lib/cadence.sh` (pure Bash, with `scripts/lib/cadence-test.sh`
+as its test runner) and classifies the upcoming sync:
 
 | Weeks since last `-post` | Tier | Treatment |
 |---|---|---|
@@ -169,9 +169,12 @@ implementation choice per Slice 03) classifies the upcoming sync:
 | 5–12 | `IncrementalCatchup` | Sync against successive upstream stable cuts (`upstream/cherrypick/stable_release/*`) instead of one large `master` merge. Resolve conflicts per cut, not all at once. Advisory message in preflight. |
 | 13+ | `FreshStart` | Stop. The integration cost has exceeded the value of incremental absorption. Cherry-pick the 40 customisation commits onto fresh `upstream/master` as a new `personal/main-v2`; tag the abandoned tip; switch the daily driver. Interactive y/N prompt in preflight; `--yes` bypasses. |
 
-The function is pure (`(today, last_post_date) → Tier`) and unit-tested
-on both sides of every boundary. See Slice 03 for the eight required
-test points.
+The function is pure (`(today_iso, last_post_iso) → Tier`) and
+unit-tested on both sides of every boundary by
+`scripts/lib/cadence-test.sh` (13 assertions: the four boundary
+weeks 1/4/12/13, the eight off-by-one days flanking each, plus the
+empty-input case). Both `scripts/weekly-sync.sh` and the CI workflow
+source the same module — there is no second implementation.
 
 The boundary numbers come from the PRD; do not negotiate them in this
 document — change the PRD if a different cadence proves correct after
