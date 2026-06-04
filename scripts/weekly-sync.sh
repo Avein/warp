@@ -12,6 +12,28 @@ set -euo pipefail
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/sync-helpers.sh
 source "$script_dir/lib/sync-helpers.sh"
+# shellcheck source=lib/cadence.sh
+source "$script_dir/lib/cadence.sh"
+
+YES=0
+while (( $# > 0 )); do
+  case "$1" in
+    --yes|-y) YES=1; shift ;;
+    --help|-h)
+      cat <<'EOF'
+Usage: scripts/weekly-sync.sh [--yes]
+
+Runs the full local weekly-sync sequence — see docs/fork-strategy.md section 2.4.
+
+  --yes, -y  Skip the FreshStart-tier confirmation prompt. Other tier
+             advisories are non-blocking and unaffected. Useful when
+             scripting this sync from a cron or CI step.
+EOF
+      exit 0
+      ;;
+    *) die "unknown flag: $1" ;;
+  esac
+done
 
 cd_repo_root
 
@@ -20,6 +42,38 @@ require_branch "$PERSONAL_BRANCH"
 require_clean_tree
 require_remote "$FORK_REMOTE"
 require_remote "$UPSTREAM_REMOTE"
+
+# Cadence advisory: read the latest -post tag's date (or empty if no
+# successful sync yet), classify the tier, and surface a non-blocking
+# advisory message. Only the FreshStart tier blocks (with --yes
+# bypass), per docs/fork-strategy.md section 4.
+latest_post_tag=$(git tag --list "$TAG_PREFIX/*-post" --sort=-creatordate | head -n1)
+if [[ -n "$latest_post_tag" ]]; then
+  # Tag form: personal/sync/YYYY-MM-DD-post -> YYYY-MM-DD
+  last_post_date="${latest_post_tag#$TAG_PREFIX/}"
+  last_post_date="${last_post_date%-post}"
+else
+  last_post_date=""
+fi
+
+tier=$(cadence_tier "$(today_iso)" "$last_post_date") \
+  || die "cadence tier classification failed"
+note "cadence tier for this run: $tier (last -post: ${last_post_date:-none})"
+
+if [[ "$tier" != "Normal" ]]; then
+  note ""
+  cadence_advisory "$tier"
+  note ""
+fi
+
+if [[ "$tier" == "FreshStart" && "$YES" != "1" ]]; then
+  printf 'Continue with the normal weekly-sync workflow anyway? [y/N] '
+  IFS= read -r answer
+  case "$answer" in
+    y|Y|yes|YES) ;;
+    *) die "aborted by user; see docs/fork-strategy.md section 4 for fresh-start mode" ;;
+  esac
+fi
 
 # 2. Fetch upstream.
 note "fetching $UPSTREAM_REMOTE..."
