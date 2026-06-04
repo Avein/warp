@@ -84,11 +84,7 @@ pub fn dock_menu() -> Menu {
         "New Window",
         vec![MenuItem::Custom(CustomMenuItem::new(
             "New Window",
-            move |ctx| {
-                ctx.dispatch_global_action("root_view:open_new", &());
-                // Persist: PersistedStateMutation::NewOsWindowOpened
-                ctx.dispatch_global_action("workspace:save_app", &());
-            },
+            open_new_window,
             no_updates,
             Some(Keystroke::parse("cmd-n").expect("Valid keystroke")),
         ))],
@@ -1102,9 +1098,18 @@ fn open_new_agent_tab_or_window(ctx: &mut AppContext) {
     }
 }
 
-/// Dispatch event to open a new Warp window
-fn open_new_window(ctx: &mut AppContext) {
-    ctx.dispatch_global_action("root_view:open_new", &());
+/// Dispatch event to open a new Warp window. When the app currently has no windows (the user
+/// closed everything and warp is running dock-only), spawn the synthetic-root project-tab
+/// instead of a plain unstamped window — mirrors `launch()`'s empty-state fallback so the
+/// "user always lands on root when there are no projects" guarantee holds across every
+/// new-window entrypoint (Cmd+N, File > New Window, Dock menu, Dock-icon click). With an
+/// active window, plain Cmd+N behavior is unchanged.
+pub(crate) fn open_new_window(ctx: &mut AppContext) {
+    if ctx.window_ids().next().is_none() {
+        ctx.dispatch_global_action("root_view:spawn_synthetic_root", &());
+    } else {
+        ctx.dispatch_global_action("root_view:open_new", &());
+    }
     // Persist: PersistedStateMutation::NewOsWindowOpened
     ctx.dispatch_global_action("workspace:save_app", &());
 }

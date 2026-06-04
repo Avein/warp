@@ -2261,11 +2261,10 @@ pub(crate) fn app_callbacks(is_integration_test: bool) -> warpui::platform::AppC
         on_new_window_requested: Some(Box::new(move |ctx| {
             // This one is called when the app is requested to open a new window,
             // e.g. clicking on the Dock icon. It is NOT called from the New Window
-            // menu item.
+            // menu item. Delegates to `app_menus::open_new_window` so the empty-state
+            // synthetic-root fallback is shared with the menu entrypoints.
             App::record_last_active_timestamp();
-            ctx.dispatch_global_action("root_view:open_new", &());
-            // Persist: PersistedStateMutation::NewOsWindowOpened
-            ctx.dispatch_global_action("workspace:save_app", &());
+            app_menus::open_new_window(ctx);
         })),
         on_open_urls: Some(Box::new(move |urls, ctx| {
             for url in &urls {
