@@ -18,6 +18,7 @@ mod notebooks;
 mod pane_restoration;
 #[cfg(target_os = "macos")]
 mod preview_config_migration;
+mod project_tab_persistence;
 mod remote_server;
 mod rules;
 mod secrets;
@@ -57,6 +58,7 @@ pub use keyboard_protocol::*;
 pub use launch_configs::*;
 pub use notebooks::*;
 pub use pane_restoration::*;
+pub use project_tab_persistence::*;
 use parking_lot::Mutex;
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::Vector2F;

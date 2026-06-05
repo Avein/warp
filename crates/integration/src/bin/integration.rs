@@ -364,6 +364,14 @@ fn register_tests() -> HashMap<&'static str, BoxedBuilderFn> {
     register_test!(test_closed_panes_cleared_on_rearrangement);
     register_test!(test_tab_closes_when_last_visible_pane_closed);
 
+    // Projects-persistence regression tests — see
+    // `docs/issues/fork-strategy-05-persistence-integration-tests.md`.
+    register_test!(test_save_before_persistence_writer_terminate_004fbc98);
+    register_test!(test_save_on_open_project_tab_into_existing_window_a2ddd467);
+    register_test!(test_save_on_close_non_last_project_tab_e9144fe2);
+    register_test!(test_project_tab_strip_order_save_side_3fdf62cb);
+    register_test!(test_project_workspaces_eager_seed_initial_terminal_0dd69b46);
+
     register_test!(test_notebook_pane_tracking);
     register_test!(test_close_notebook_tab);
     register_test!(test_open_in_warp_banner);

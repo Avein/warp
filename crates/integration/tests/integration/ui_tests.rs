@@ -339,4 +339,12 @@ integration_tests! {
     // Video recording test — requires real display, run manually
     #[ignore = "Manual test: requires real display for frame capture"]
     test_video_recording,
+
+    // Projects-persistence integration tests — see
+    // `docs/issues/fork-strategy-05-persistence-integration-tests.md`.
+    test_save_before_persistence_writer_terminate_004fbc98,
+    test_save_on_open_project_tab_into_existing_window_a2ddd467,
+    test_save_on_close_non_last_project_tab_e9144fe2,
+    test_project_tab_strip_order_save_side_3fdf62cb,
+    test_project_workspaces_eager_seed_initial_terminal_0dd69b46,
 }
