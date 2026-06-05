@@ -176,7 +176,7 @@ pub fn test_launch_config_single_child_branch() -> Builder {
                         split_direction: SplitDirection::Horizontal,
                         panes: vec![PaneTemplateType::PaneTemplate {
                             is_focused: Some(true),
-                            cwd: PathBuf::from("/some/path"),
+                            cwd: Some(PathBuf::from("/some/path")),
                             commands: Vec::new(),
                             pane_mode: PaneMode::Terminal,
                             shell: None,
@@ -305,7 +305,7 @@ pub fn test_with_launch_config_with_active_tab_index() -> Builder {
                             split_direction: SplitDirection::Horizontal,
                             panes: vec![PaneTemplateType::PaneTemplate {
                                 is_focused: Some(true),
-                                cwd: PathBuf::from("/some/path"),
+                                cwd: Some(PathBuf::from("/some/path")),
                                 commands: Vec::new(),
                                 pane_mode: PaneMode::Terminal,
                                 shell: None,
@@ -364,7 +364,7 @@ pub fn test_with_launch_config_with_active_pane() -> Builder {
                         panes: vec![
                             PaneTemplateType::PaneTemplate {
                                 is_focused: Some(false),
-                                cwd: PathBuf::from("/some/path"),
+                                cwd: Some(PathBuf::from("/some/path")),
                                 commands: Vec::new(),
                                 pane_mode: PaneMode::Terminal,
                                 shell: None,
@@ -374,14 +374,14 @@ pub fn test_with_launch_config_with_active_pane() -> Builder {
                                 panes: vec![
                                     PaneTemplateType::PaneTemplate {
                                         is_focused: Some(false),
-                                        cwd: PathBuf::from("/some/path"),
+                                        cwd: Some(PathBuf::from("/some/path")),
                                         commands: Vec::new(),
                                         pane_mode: PaneMode::Terminal,
                                         shell: None,
                                     },
                                     PaneTemplateType::PaneTemplate {
                                         is_focused: Some(true),
-                                        cwd: PathBuf::from("/some/path"),
+                                        cwd: Some(PathBuf::from("/some/path")),
                                         commands: Vec::new(),
                                         pane_mode: PaneMode::Terminal,
                                         shell: None,
@@ -442,7 +442,7 @@ pub fn test_with_launch_config_with_no_active_pane() -> Builder {
                         panes: vec![
                             PaneTemplateType::PaneTemplate {
                                 is_focused: Some(false),
-                                cwd: PathBuf::from("/some/path"),
+                                cwd: Some(PathBuf::from("/some/path")),
                                 commands: Vec::new(),
                                 pane_mode: PaneMode::Terminal,
                                 shell: None,
@@ -452,14 +452,14 @@ pub fn test_with_launch_config_with_no_active_pane() -> Builder {
                                 panes: vec![
                                     PaneTemplateType::PaneTemplate {
                                         is_focused: Some(false),
-                                        cwd: PathBuf::from("/some/path"),
+                                        cwd: Some(PathBuf::from("/some/path")),
                                         commands: Vec::new(),
                                         pane_mode: PaneMode::Terminal,
                                         shell: None,
                                     },
                                     PaneTemplateType::PaneTemplate {
                                         is_focused: Some(false),
-                                        cwd: PathBuf::from("/some/path"),
+                                        cwd: Some(PathBuf::from("/some/path")),
                                         commands: Vec::new(),
                                         pane_mode: PaneMode::Terminal,
                                         shell: None,
