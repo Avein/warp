@@ -28,8 +28,8 @@ use warp::integration_testing::terminal::wait_until_bootstrapped_single_pane_for
 use warp::launch_configs::launch_config::LaunchConfig;
 use warp::root_view::{CloseWorkspaceArg, FocusOrSpawnProjectArg};
 use warp::workspace::{ProjectOrigin, WorkspaceRegistry};
-use warpui::integration::{AssertionOutcome, TestStep};
-use warpui::SingletonEntity;
+use warpui_core::integration::{AssertionOutcome, TestStep};
+use warpui_core::SingletonEntity;
 
 use super::{new_builder, Builder};
 
