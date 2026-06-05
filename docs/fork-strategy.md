@@ -8,10 +8,9 @@
 > Per-slice issues live under
 > [`docs/issues/fork-strategy-01..07-*.md`](./issues/).
 >
-> **Status:** Slice 01 (bootstrap) landed. Scripts and workflows
-> referenced below land in Slices 02–07; until then, the procedural
-> sections describe the intended commands rather than executable
-> tooling.
+> **Status:** Slices 01–06 landed. The promote-candidate workflow
+> referenced in §2.3 lands in Slice 07; until then, that section
+> describes the intended command rather than executable tooling.
 
 ## 1. Topology
 
@@ -69,6 +68,15 @@ ad-hoc runs. Runs on `macos-14` (arm64). Sequence:
     with the artifact link, the smoke checklist from §6, and the
     one-line promote command:
     `gh workflow run promote-candidate.yml -f date=YYYY-MM-DD`.
+
+The workflow uses three Issue labels — created idempotently on first
+run, so manual repository setup is not required:
+
+| Label | Opened when | Title pattern |
+|---|---|---|
+| `sync-conflict` | `git merge --no-ff master` hits a conflict | `Sync conflict: YYYY-MM-DD` |
+| `sync-test-fail` | tier-(ii) `cargo nextest` gate fails | `Sync test failure: YYYY-MM-DD` |
+| `sync-ready` | clean run; candidate + artifact ready to smoke | `Sync candidate ready: YYYY-MM-DD` |
 
 ### 2.2 Manual smoke gate
 

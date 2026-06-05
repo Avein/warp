@@ -1,0 +1,412 @@
+# Weekly upstream-absorption sync — runs only on the fork's personal/main.
+#
+# Mirrors the local fallback in scripts/weekly-sync.sh and the canonical
+# procedure in docs/fork-strategy.md §2.1. Triggers Monday 08:00 UTC plus
+# workflow_dispatch for ad-hoc runs.
+#
+# Outcomes (mutually exclusive):
+#   - merge conflict  -> sync-conflict Issue, nothing pushed beyond master FF
+#   - test failure    -> sync-test-fail Issue, candidate branch pushed, logs uploaded
+#   - clean run       -> sync-ready    Issue, candidate + -pre tag pushed, WarpOss.app artifact
+#
+# personal/main is never moved by this workflow; promotion is a separate
+# workflow_dispatch (`promote-candidate.yml`, Slice 07).
+
+name: Weekly upstream sync
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  PERSONAL_BRANCH: personal/main
+  TAG_PREFIX: personal/sync
+  UPSTREAM_URL: https://github.com/warpdotdev/warp.git
+  # Tier-(ii) test selector: pure-module unit tests in the warp crate
+  # (Slice 04 — identity_dedupe, template_sequence, save_policy,
+  # display_name_tests) plus the 5 persistence integration tests in the
+  # integration crate (Slice 05).
+  TIER_II_WARP_FILTER: >-
+    test(/identity_dedupe::/) +
+    test(/template_sequence::/) +
+    test(/save_policy::/) +
+    test(/display_name_tests::/)
+  TIER_II_INTEGRATION_TESTS: >-
+    test_save_before_persistence_writer_terminate_004fbc98
+    test_save_on_open_project_tab_into_existing_window_a2ddd467
+    test_save_on_close_non_last_project_tab_e9144fe2
+    test_project_tab_strip_order_save_side_3fdf62cb
+    test_project_workspaces_eager_seed_initial_terminal_0dd69b46
+
+jobs:
+  sync:
+    name: Sync candidate
+    runs-on: macos-14
+    steps:
+      - name: Checkout personal/main with full history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: personal/main
+          fetch-depth: 0
+          # The default GITHUB_TOKEN cannot push protected branches but
+          # personal/main is not protected on this fork; the default token is
+          # sufficient for pushing the candidate branch and the -pre tag.
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Skip LFS on this initial checkout — the prepare_environment
+          # action pulls LFS for us if/when it's reached.
+          lfs: false
+
+      - name: Capture run date (UTC)
+        id: today
+        shell: bash
+        run: |
+          today=$(date -u +%Y-%m-%d)
+          {
+            echo "iso=$today"
+            echo "candidate=${{ env.TAG_PREFIX }}/${today}-candidate"
+            echo "pre_tag=${{ env.TAG_PREFIX }}/${today}-pre"
+          } >> "$GITHUB_OUTPUT"
+          echo "Run date: $today"
+
+      - name: Configure git identity
+        shell: bash
+        run: |
+          git config user.name  "weekly-sync[bot]"
+          git config user.email "weekly-sync@users.noreply.github.com"
+
+      - name: Ensure sync-* Issue labels exist
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Idempotent — `gh label create` is a no-op when the label already
+          # exists (and the `|| true` swallows the duplicate-name error).
+          gh label create sync-ready    --color "0e8a16" --description "Sync candidate ready to smoke + promote"     2>/dev/null || true
+          gh label create sync-conflict --color "d93f0b" --description "Sync hit a merge conflict; manual resolve"   2>/dev/null || true
+          gh label create sync-test-fail --color "b60205" --description "Sync candidate's tier-(ii) test gate failed" 2>/dev/null || true
+
+      - name: Configure upstream remote
+        shell: bash
+        run: |
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream "$UPSTREAM_URL"
+          else
+            git remote add upstream "$UPSTREAM_URL"
+          fi
+          git fetch upstream --quiet
+          git fetch origin --quiet
+
+      - name: Cadence preflight (advisory)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/lib/cadence.sh
+          source scripts/lib/cadence.sh
+
+          latest_post_tag=$(git tag --list "${TAG_PREFIX}/*-post" --sort=-creatordate | head -n1)
+          if [[ -n "$latest_post_tag" ]]; then
+            # Quote the inner expansion so the prefix-strip is not glob-interpreted.
+            last_post_date="${latest_post_tag#"${TAG_PREFIX}"/}"
+            last_post_date="${last_post_date%-post}"
+          else
+            last_post_date=""
+          fi
+
+          tier=$(cadence_tier "${{ steps.today.outputs.iso }}" "$last_post_date")
+          echo "Cadence tier: $tier (last -post: ${last_post_date:-none})"
+          # Surface to subsequent steps as a workflow-level annotation.
+          if [[ "$tier" != "Normal" ]]; then
+            echo "::notice title=Cadence tier::$tier — see docs/fork-strategy.md §4"
+            cadence_advisory "$tier" || true
+          fi
+
+      - name: Fast-forward master to upstream/master
+        shell: bash
+        run: |
+          set -euo pipefail
+          git switch master --quiet 2>/dev/null \
+            || git switch -c master upstream/master --quiet
+          git merge --ff-only upstream/master --quiet
+          git push origin master
+          git switch "$PERSONAL_BRANCH" --quiet
+
+      - name: Short-circuit if no upstream work to absorb
+        id: needs_sync
+        shell: bash
+        run: |
+          master_sha=$(git rev-parse master)
+          if git merge-base --is-ancestor "$master_sha" "$PERSONAL_BRANCH"; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=No-op sync::master is already reachable from $PERSONAL_BRANCH"
+          else
+            echo "needed=true"  >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Refuse same-day reruns of -pre/candidate
+        if: steps.needs_sync.outputs.needed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/${{ steps.today.outputs.pre_tag }}" >/dev/null; then
+            echo "::error title=Stale pre-tag::${{ steps.today.outputs.pre_tag }} already exists; previous run was not resolved"
+            exit 1
+          fi
+          # Check both local and remote candidates.
+          if git rev-parse -q --verify "refs/heads/${{ steps.today.outputs.candidate }}" >/dev/null \
+            || git rev-parse -q --verify "refs/remotes/origin/${{ steps.today.outputs.candidate }}" >/dev/null
+          then
+            echo "::error title=Stale candidate branch::${{ steps.today.outputs.candidate }} already exists; previous run was not resolved"
+            exit 1
+          fi
+
+      - name: Create candidate branch
+        if: steps.needs_sync.outputs.needed == 'true'
+        shell: bash
+        run: |
+          git switch -c "${{ steps.today.outputs.candidate }}" "$PERSONAL_BRANCH" --quiet
+
+      - name: Merge master into candidate
+        id: merge
+        if: steps.needs_sync.outputs.needed == 'true'
+        shell: bash
+        run: |
+          set +e
+          git merge --no-ff master -m "merge upstream/master into ${{ steps.today.outputs.candidate }}"
+          merge_status=$?
+          set -e
+          if [[ "$merge_status" -ne 0 ]]; then
+            # Capture conflicted paths for the Issue body before aborting.
+            git diff --name-only --diff-filter=U > /tmp/conflicted-files.txt || true
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            git merge --abort || true
+            git switch "$PERSONAL_BRANCH" --quiet || true
+            exit 0  # fall through to the conflict-Issue step
+          fi
+          echo "conflict=false" >> "$GITHUB_OUTPUT"
+
+      - name: Open sync-conflict Issue and halt
+        if: steps.merge.outputs.conflict == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          conflicted=$(sed 's/^/- `/' /tmp/conflicted-files.txt | sed 's/$/`/')
+          if [[ -z "$conflicted" ]]; then
+            conflicted="(no conflicted paths captured; rerun locally to enumerate)"
+          fi
+          body=$(cat <<EOF
+          The weekly-sync workflow hit a merge conflict at \`git merge --no-ff master\` on candidate \`${{ steps.today.outputs.candidate }}\`.
+
+          ## Conflicted paths
+
+          $conflicted
+
+          ## Policy reminder (docs/fork-strategy.md §3)
+
+          - **DEFAULT** — favor upstream: \`git checkout --theirs <path>\`, then re-implement the local feature on top of upstream's new shape inside the same merge commit.
+          - **EXCEPTION 1** — documented invariant: if upstream's change breaks a guarantee in \`docs/projects-persistence.md\`, \`docs/projects-rename-summary.md\`, or \`docs/issues/projects-persistence-0[1-4]-*.md\`, favor the local guarantee and migrate the implementation to upstream's new substrate.
+          - **EXCEPTION 2** — pure feature removal: re-add as a private helper inside the dependent module, not as a fork-of-upstream public API.
+
+          ## Next steps
+
+          Resolve locally via \`scripts/weekly-sync.sh\` (it refuses to run if anything has been pushed in the meantime; the personal/main tip has not been moved by this run).
+
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )
+          gh issue create \
+            --title "Sync conflict: ${{ steps.today.outputs.iso }}" \
+            --label "sync-conflict" \
+            --body "$body"
+          # Halt non-zero so the run is visibly red.
+          exit 1
+
+      - name: Prepare build/test environment
+        if: steps.needs_sync.outputs.needed == 'true' && steps.merge.outputs.conflict != 'true'
+        uses: ./.github/actions/prepare_environment
+        with:
+          target_os: macos
+          is_self_hosted: "false"
+          install_test_deps: "true"
+
+      - name: Install cargo-nextest
+        if: steps.needs_sync.outputs.needed == 'true' && steps.merge.outputs.conflict != 'true'
+        shell: bash
+        run: |
+          cargo binstall --no-confirm --force cargo-nextest
+
+      - name: Run tier-(ii) tests
+        id: test
+        if: steps.needs_sync.outputs.needed == 'true' && steps.merge.outputs.conflict != 'true'
+        shell: bash
+        run: |
+          set +e
+          mkdir -p ci-logs
+          # Pure-module unit tests in the warp crate (Slice 04).
+          cargo nextest run \
+            --no-fail-fast \
+            -p warp \
+            -E "$TIER_II_WARP_FILTER" \
+            2>&1 | tee ci-logs/tier-ii-warp.log
+          warp_status=${PIPESTATUS[0]}
+          # Persistence integration tests in the integration crate (Slice 05).
+          # Word-split TIER_II_INTEGRATION_TESTS deliberately — nextest wants each
+          # test name as its own positional arg.
+          # shellcheck disable=SC2086
+          cargo nextest run \
+            --no-fail-fast \
+            -p integration \
+            $TIER_II_INTEGRATION_TESTS \
+            2>&1 | tee ci-logs/tier-ii-integration.log
+          integ_status=${PIPESTATUS[0]}
+          set -e
+          if [[ "$warp_status" -ne 0 || "$integ_status" -ne 0 ]]; then
+            echo "failed=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "failed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push candidate branch (for inspection) on test failure
+        if: steps.test.outputs.failed == 'true'
+        shell: bash
+        run: |
+          git push origin "${{ steps.today.outputs.candidate }}"
+
+      - name: Upload test logs on failure
+        if: steps.test.outputs.failed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tier-ii-test-logs-${{ steps.today.outputs.iso }}
+          path: ci-logs/
+          retention-days: 90
+
+      - name: Open sync-test-fail Issue and halt
+        if: steps.test.outputs.failed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          body=$(cat <<EOF
+          The weekly-sync workflow's tier-(ii) test gate failed on candidate \`${{ steps.today.outputs.candidate }}\`.
+
+          - Candidate branch (pushed for inspection): \`${{ steps.today.outputs.candidate }}\`
+          - Workflow run + logs artifact: $run_url
+          - Tier-(ii) selector covers: \`identity_dedupe\`, \`template_sequence\`, \`save_policy\`, \`display_name_tests\` (warp crate) plus the 5 projects-persistence integration tests (integration crate).
+
+          \`personal/main\` was not moved. The \`-pre\` tag was not created. Resolve locally and re-run, or rollback if the failure is upstream-caused.
+          EOF
+          )
+          gh issue create \
+            --title "Sync test failure: ${{ steps.today.outputs.iso }}" \
+            --label "sync-test-fail" \
+            --body "$body"
+          exit 1
+
+      - name: Tag -pre on personal/main
+        if: steps.needs_sync.outputs.needed == 'true' && steps.merge.outputs.conflict != 'true' && steps.test.outputs.failed != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git tag "${{ steps.today.outputs.pre_tag }}" "$PERSONAL_BRANCH"
+
+      - name: Build WarpOss.app (OSS channel, unsigned, arm64)
+        if: steps.needs_sync.outputs.needed == 'true' && steps.merge.outputs.conflict != 'true' && steps.test.outputs.failed != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./script/bundle --channel oss --nosign --nouniversal
+
+      - name: Locate the built WarpOss.app
+        id: bundle
+        if: steps.needs_sync.outputs.needed == 'true' && steps.merge.outputs.conflict != 'true' && steps.test.outputs.failed != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The macos bundle script writes WarpOss.app under target/.
+          # Search for the freshest match so a layout change does not silently
+          # ship the wrong artifact.
+          path=$(find target -type d -name "WarpOss.app" -print 2>/dev/null | head -n1 || true)
+          if [[ -z "$path" ]]; then
+            echo "::error title=Bundle missing::No WarpOss.app produced under target/"
+            exit 1
+          fi
+          echo "Found bundle: $path"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+
+      - name: Push candidate branch and -pre tag
+        if: steps.needs_sync.outputs.needed == 'true' && steps.merge.outputs.conflict != 'true' && steps.test.outputs.failed != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin \
+            "${{ steps.today.outputs.candidate }}" \
+            "refs/tags/${{ steps.today.outputs.pre_tag }}"
+
+      - name: Upload WarpOss.app artifact
+        id: upload_app
+        if: steps.needs_sync.outputs.needed == 'true' && steps.merge.outputs.conflict != 'true' && steps.test.outputs.failed != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: WarpOss-${{ steps.today.outputs.iso }}
+          path: ${{ steps.bundle.outputs.path }}
+          retention-days: 90
+
+      - name: Open sync-ready Issue
+        if: steps.needs_sync.outputs.needed == 'true' && steps.merge.outputs.conflict != 'true' && steps.test.outputs.failed != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          artifact_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts"
+          body=$(cat <<EOF
+          A weekly-sync candidate is ready to smoke. \`personal/main\` was not moved; promote with the command below after walking the smoke checklist.
+
+          ## Artifact
+
+          [WarpOss-${{ steps.today.outputs.iso }}.zip]($artifact_url) (90-day retention)
+
+          Install:
+
+          \`\`\`sh
+          xattr -dr com.apple.quarantine ~/Downloads/WarpOss.app
+          mv ~/Downloads/WarpOss.app /Applications/
+          open /Applications/WarpOss.app
+          \`\`\`
+
+          ## Smoke checklist (docs/fork-strategy.md §6)
+
+          A single No anywhere = do not promote.
+
+          - [ ] **Smoke 1** — Palette open and search (override and identity hits both match)
+          - [ ] **Smoke 2** — F2 inline rename commits via Enter; empty buffer reverts to identity
+          - [ ] **Smoke 3** — Persistence: open + rename + close non-last + Cmd-Q + relaunch restores correctly
+          - [ ] **Smoke 4** — Synthetic root: with all windows closed, new-window entrypoint spawns root
+          - [ ] **Smoke 5** — Project-bar strip order preserved across Cmd-Q + relaunch
+
+          ## Promote
+
+          When all five smokes are green:
+
+          \`\`\`sh
+          gh workflow run promote-candidate.yml -f date=${{ steps.today.outputs.iso }}
+          \`\`\`
+
+          ## References
+
+          - Candidate branch: \`${{ steps.today.outputs.candidate }}\`
+          - \`-pre\` tag: \`${{ steps.today.outputs.pre_tag }}\`
+          - Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )
+          gh issue create \
+            --title "Sync candidate ready: ${{ steps.today.outputs.iso }}" \
+            --label "sync-ready" \
+            --body "$body"
