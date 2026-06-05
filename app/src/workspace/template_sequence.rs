@@ -78,4 +78,42 @@ mod tests {
         let in_use = names(&["dragon-fire", "default-3"]);
         assert_eq!(next_template_sequence_name("default", &in_use), "default-1");
     }
+
+    #[test]
+    fn idempotent_for_equivalent_inputs() {
+        // Two equal `in_use` sets must produce the same result on repeated
+        // calls — there is no internal state, no clock, no randomness.
+        let in_use = names(&["default-1", "default-2", "default-4"]);
+        let first = next_template_sequence_name("default", &in_use);
+        let second = next_template_sequence_name("default", &in_use);
+        let third = next_template_sequence_name("default", &in_use);
+        assert_eq!(first, "default-3");
+        assert_eq!(first, second);
+        assert_eq!(second, third);
+    }
+
+    #[test]
+    fn successive_opens_advance_through_the_sequence() {
+        // Simulates opening N tabs in sequence: each call uses the result of
+        // the previous one as part of the next `in_use_names`. The expected
+        // order is `default-1` → `default-2` → `default-3` → ... with no
+        // skips and no duplicates, even after a gap is introduced by a
+        // close.
+        let mut in_use: HashSet<String> = HashSet::new();
+        let opened: Vec<String> = (0..5)
+            .map(|_| {
+                let name = next_template_sequence_name("default", &in_use);
+                in_use.insert(name.clone());
+                name
+            })
+            .collect();
+        assert_eq!(
+            opened,
+            vec!["default-1", "default-2", "default-3", "default-4", "default-5"]
+        );
+
+        // Close `default-3`. The next open fills the gap, not slot 6.
+        in_use.remove("default-3");
+        assert_eq!(next_template_sequence_name("default", &in_use), "default-3");
+    }
 }
