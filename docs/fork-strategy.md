@@ -8,9 +8,8 @@
 > Per-slice issues live under
 > [`docs/issues/fork-strategy-01..07-*.md`](./issues/).
 >
-> **Status:** Slices 01–06 landed. The promote-candidate workflow
-> referenced in §2.3 lands in Slice 07; until then, that section
-> describes the intended command rather than executable tooling.
+> **Status:** Slices 01–07 landed. The procedure described below is
+> fully executable end-to-end.
 
 ## 1. Topology
 

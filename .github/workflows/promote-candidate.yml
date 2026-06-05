@@ -1,0 +1,248 @@
+# Promote a smoked weekly-sync candidate to personal/main.
+#
+# The second half of the two-stage weekly procedure: weekly-sync.yml
+# produces a candidate + WarpOss.app artifact + sync-ready Issue, the
+# developer walks docs/fork-strategy.md §6 smoke checklist by hand,
+# then dispatches this workflow with the same date.
+#
+# Atomic outcomes (idempotent if rerun on a candidate already promoted —
+# the fast-forward becomes a no-op and the tag step refuses; failure
+# halts before any external state changes):
+#
+#   - personal/main fast-forwarded to the candidate's tip
+#   - personal/sync/<date>-post tag created and pushed (byte-identical
+#     form to the local script's tag, so the rollback script treats
+#     them interchangeably)
+#   - GitHub Release v<date> with WarpOss.app attached
+#   - sync-ready Issue closed with a comment linking the Release
+#
+# Runs on ubuntu-latest because it does git + GitHub API operations
+# only (no build), keeping promote off the macos-14 quota multiplier.
+
+name: Promote sync candidate
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Sync date (YYYY-MM-DD) — matches the candidate branch suffix"
+        required: true
+        type: string
+      delete_candidate:
+        description: "Delete the candidate branch after promotion"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  PERSONAL_BRANCH: personal/main
+  TAG_PREFIX: personal/sync
+
+jobs:
+  promote:
+    name: Promote candidate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate date input
+        id: input
+        shell: bash
+        env:
+          DATE_INPUT: ${{ inputs.date }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$DATE_INPUT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "::error title=Bad date input::Expected YYYY-MM-DD, got '$DATE_INPUT'"
+            exit 1
+          fi
+          {
+            echo "iso=$DATE_INPUT"
+            echo "candidate=${{ env.TAG_PREFIX }}/${DATE_INPUT}-candidate"
+            echo "post_tag=${{ env.TAG_PREFIX }}/${DATE_INPUT}-post"
+            echo "release_tag=v${DATE_INPUT}"
+            echo "artifact_name=WarpOss-${DATE_INPUT}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout personal/main with full history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: personal/main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          lfs: false
+
+      - name: Configure git identity
+        shell: bash
+        run: |
+          git config user.name  "promote-candidate[bot]"
+          git config user.email "promote-candidate@users.noreply.github.com"
+
+      - name: Verify candidate branch exists on origin
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "refs/heads/${{ steps.input.outputs.candidate }}:refs/remotes/origin/${{ steps.input.outputs.candidate }}" \
+            || {
+              echo "::error title=Missing candidate::Candidate branch ${{ steps.input.outputs.candidate }} does not exist on origin"
+              exit 1
+            }
+
+      - name: Verify fast-forward is possible
+        shell: bash
+        run: |
+          set -euo pipefail
+          main_sha=$(git rev-parse "$PERSONAL_BRANCH")
+          cand_sha=$(git rev-parse "origin/${{ steps.input.outputs.candidate }}")
+          if [[ "$main_sha" == "$cand_sha" ]]; then
+            echo "::warning title=No-op promote::$PERSONAL_BRANCH is already at the candidate's tip"
+          elif ! git merge-base --is-ancestor "$main_sha" "$cand_sha"; then
+            echo "::error title=Not a fast-forward::$PERSONAL_BRANCH ($main_sha) is not an ancestor of ${{ steps.input.outputs.candidate }} ($cand_sha)"
+            echo "Either rollback first (scripts/rollback-last-sync.sh) or re-run the weekly-sync to produce a fresh candidate."
+            exit 1
+          fi
+
+      - name: Refuse if post-tag already exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The post-tag is permanent; reusing it would corrupt the rollback ladder.
+          if git ls-remote --tags origin "refs/tags/${{ steps.input.outputs.post_tag }}" | grep -q .; then
+            echo "::error title=Post-tag exists::${{ steps.input.outputs.post_tag }} already exists on origin; this candidate appears already promoted"
+            exit 1
+          fi
+
+      - name: Resolve weekly-sync run for the candidate's WarpOss.app
+        id: artifact_run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Find the most-recent artifact named WarpOss-<date> across all runs.
+          # Filter to non-expired entries — expired artifacts are unreadable.
+          run_id=$(gh api -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/actions/artifacts?name=${{ steps.input.outputs.artifact_name }}&per_page=100" \
+            --jq '.artifacts[] | select(.expired == false) | .workflow_run.id' \
+            | head -n1)
+          if [[ -z "$run_id" ]]; then
+            echo "::error title=Missing artifact::No live artifact ${{ steps.input.outputs.artifact_name }} found across weekly-sync runs (expired after 90 days, or never uploaded)"
+            exit 1
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "Resolved run id: $run_id"
+
+      - name: Download WarpOss.app artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ steps.input.outputs.artifact_name }}
+          path: artifact/
+          run-id: ${{ steps.artifact_run.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+
+      - name: Repackage WarpOss.app as a release asset
+        id: asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          # actions/download-artifact unpacks the upload-artifact's zip in
+          # place. Re-zip the .app bundle so the release asset is a single
+          # downloadable file with the expected name.
+          cd artifact
+          if [[ ! -d "WarpOss.app" ]]; then
+            echo "::error title=Bundle not found in artifact::Expected WarpOss.app inside ${{ steps.input.outputs.artifact_name }}"
+            ls -laR .
+            exit 1
+          fi
+          zip -qr "../WarpOss-${{ steps.input.outputs.iso }}.zip" "WarpOss.app"
+          cd ..
+          echo "path=WarpOss-${{ steps.input.outputs.iso }}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Fast-forward personal/main to candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge --ff-only "origin/${{ steps.input.outputs.candidate }}" --quiet
+
+      - name: Tag -post on the new tip
+        shell: bash
+        run: |
+          set -euo pipefail
+          git tag "${{ steps.input.outputs.post_tag }}" "$PERSONAL_BRANCH"
+
+      - name: Push personal/main + post-tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin \
+            "$PERSONAL_BRANCH" \
+            "refs/tags/${{ steps.input.outputs.post_tag }}"
+
+      - name: Create GitHub Release with WarpOss.app attached
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          OSS-channel WarpOss.app from the ${{ steps.input.outputs.iso }} upstream-absorption sync.
+
+          - Candidate branch: \`${{ steps.input.outputs.candidate }}\`
+          - Post-sync tag: \`${{ steps.input.outputs.post_tag }}\` (= rollback ladder entry; see \`docs/fork-strategy.md\` §5)
+          - Promoted via \`promote-candidate.yml\` workflow run ${{ github.run_id }}
+          EOF
+          )
+          gh release create "${{ steps.input.outputs.release_tag }}" \
+            "${{ steps.asset.outputs.path }}" \
+            --target "${{ steps.input.outputs.post_tag }}" \
+            --title "${{ steps.input.outputs.release_tag }} — sync ${{ steps.input.outputs.iso }}" \
+            --notes "$body"
+          # Capture the URL for the Issue close comment.
+          url=$(gh release view "${{ steps.input.outputs.release_tag }}" --json url --jq '.url')
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Close the sync-ready Issue with a Release link
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Title pattern from weekly-sync.yml:
+          # "Sync candidate ready: ${date}".
+          issue_number=$(gh issue list \
+            --label sync-ready \
+            --state open \
+            --json number,title \
+            --jq ".[] | select(.title == \"Sync candidate ready: ${{ steps.input.outputs.iso }}\") | .number" \
+            | head -n1)
+          if [[ -z "$issue_number" ]]; then
+            echo "::warning title=No sync-ready Issue::Could not find an open sync-ready Issue for ${{ steps.input.outputs.iso }}. Skipping close-comment step."
+            exit 0
+          fi
+          comment=$(cat <<EOF
+          Promoted by \`promote-candidate.yml\` run ${{ github.run_id }}.
+
+          Release: ${{ steps.release.outputs.url }}
+          Post-sync tag: \`${{ steps.input.outputs.post_tag }}\`
+          EOF
+          )
+          gh issue comment "$issue_number" --body "$comment"
+          gh issue close "$issue_number"
+
+      - name: Delete candidate branch (optional)
+        if: inputs.delete_candidate == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Refuse if the candidate's tip diverged from personal/main since the
+          # FF — defensive against a parallel push between the FF and this step.
+          cand_sha=$(git rev-parse "origin/${{ steps.input.outputs.candidate }}")
+          main_sha=$(git rev-parse "$PERSONAL_BRANCH")
+          if [[ "$cand_sha" != "$main_sha" ]]; then
+            echo "::warning title=Skipping candidate deletion::candidate tip ($cand_sha) != personal/main tip ($main_sha); leaving branch in place"
+            exit 0
+          fi
+          git push origin --delete "${{ steps.input.outputs.candidate }}"
