@@ -193,36 +193,42 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANDIDATE: ${{ steps.today.outputs.candidate }}
+          ISO: ${{ steps.today.outputs.iso }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          conflicted=$(sed 's/^/- `/' /tmp/conflicted-files.txt | sed 's/$/`/')
-          if [[ -z "$conflicted" ]]; then
-            conflicted="(no conflicted paths captured; rerun locally to enumerate)"
-          fi
-          body=$(cat <<EOF
-          The weekly-sync workflow hit a merge conflict at \`git merge --no-ff master\` on candidate \`${{ steps.today.outputs.candidate }}\`.
-
-          ## Conflicted paths
-
-          $conflicted
+          # Build the Issue body in a file with mixed heredoc modes so
+          # apostrophes in the policy block do not confuse bash's parser
+          # inside a command-substitution context — the same kind of
+          # subtle quoting failure the first run of this workflow tripped.
+          {
+            printf 'The weekly-sync workflow hit a merge conflict at `git merge --no-ff master` on candidate `%s`.\n\n' "$CANDIDATE"
+            printf '## Conflicted paths\n\n'
+            if [[ -s /tmp/conflicted-files.txt ]]; then
+              sed 's/^/- `/' /tmp/conflicted-files.txt | sed 's/$/`/'
+            else
+              printf '%s\n' '(no conflicted paths captured; rerun locally to enumerate)'
+            fi
+            cat <<'EOF'
 
           ## Policy reminder (docs/fork-strategy.md §3)
 
-          - **DEFAULT** — favor upstream: \`git checkout --theirs <path>\`, then re-implement the local feature on top of upstream's new shape inside the same merge commit.
-          - **EXCEPTION 1** — documented invariant: if upstream's change breaks a guarantee in \`docs/projects-persistence.md\`, \`docs/projects-rename-summary.md\`, or \`docs/issues/projects-persistence-0[1-4]-*.md\`, favor the local guarantee and migrate the implementation to upstream's new substrate.
+          - **DEFAULT** — favor upstream: `git checkout --theirs <path>`, then re-implement the local feature on top of upstream's new shape inside the same merge commit.
+          - **EXCEPTION 1** — documented invariant: if upstream's change breaks a guarantee in `docs/projects-persistence.md`, `docs/projects-rename-summary.md`, or `docs/issues/projects-persistence-0[1-4]-*.md`, favor the local guarantee and migrate the implementation to upstream's new substrate.
           - **EXCEPTION 2** — pure feature removal: re-add as a private helper inside the dependent module, not as a fork-of-upstream public API.
 
           ## Next steps
 
-          Resolve locally via \`scripts/weekly-sync.sh\` (it refuses to run if anything has been pushed in the meantime; the personal/main tip has not been moved by this run).
+          Resolve locally via `scripts/weekly-sync.sh` (it refuses to run if anything has been pushed in the meantime; the personal/main tip has not been moved by this run).
 
-          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           EOF
-          )
+            printf 'Workflow run: %s\n' "$RUN_URL"
+          } > /tmp/issue-body.md
           gh issue create \
-            --title "Sync conflict: ${{ steps.today.outputs.iso }}" \
+            --title "Sync conflict: $ISO" \
             --label "sync-conflict" \
-            --body "$body"
+            --body-file /tmp/issue-body.md
           # Halt non-zero so the run is visibly red.
           exit 1
 
@@ -290,23 +296,28 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANDIDATE: ${{ steps.today.outputs.candidate }}
+          ISO: ${{ steps.today.outputs.iso }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          body=$(cat <<EOF
-          The weekly-sync workflow's tier-(ii) test gate failed on candidate \`${{ steps.today.outputs.candidate }}\`.
+          # Same mixed-heredoc pattern as the sync-conflict step — keeps
+          # apostrophes ("workflow's") literal without confusing bash's
+          # parser inside a command-substitution context.
+          {
+            printf 'The weekly-sync workflow tier-(ii) test gate failed on candidate `%s`.\n\n' "$CANDIDATE"
+            printf -- '- Candidate branch (pushed for inspection): `%s`\n' "$CANDIDATE"
+            printf -- '- Workflow run + logs artifact: %s\n' "$RUN_URL"
+            cat <<'EOF'
+          - Tier-(ii) selector covers: `identity_dedupe`, `template_sequence`, `save_policy`, `display_name_tests` (warp crate) plus the 5 projects-persistence integration tests (integration crate).
 
-          - Candidate branch (pushed for inspection): \`${{ steps.today.outputs.candidate }}\`
-          - Workflow run + logs artifact: $run_url
-          - Tier-(ii) selector covers: \`identity_dedupe\`, \`template_sequence\`, \`save_policy\`, \`display_name_tests\` (warp crate) plus the 5 projects-persistence integration tests (integration crate).
-
-          \`personal/main\` was not moved. The \`-pre\` tag was not created. Resolve locally and re-run, or rollback if the failure is upstream-caused.
+          `personal/main` was not moved. The `-pre` tag was not created. Resolve locally and re-run, or rollback if the failure is upstream-caused.
           EOF
-          )
+          } > /tmp/issue-body.md
           gh issue create \
-            --title "Sync test failure: ${{ steps.today.outputs.iso }}" \
+            --title "Sync test failure: $ISO" \
             --label "sync-test-fail" \
-            --body "$body"
+            --body-file /tmp/issue-body.md
           exit 1
 
       - name: Tag -pre on personal/main
@@ -363,23 +374,27 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANDIDATE: ${{ steps.today.outputs.candidate }}
+          PRE_TAG: ${{ steps.today.outputs.pre_tag }}
+          ISO: ${{ steps.today.outputs.iso }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          artifact_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts"
-          body=$(cat <<EOF
-          A weekly-sync candidate is ready to smoke. \`personal/main\` was not moved; promote with the command below after walking the smoke checklist.
-
-          ## Artifact
-
-          [WarpOss-${{ steps.today.outputs.iso }}.zip]($artifact_url) (90-day retention)
-
+          # Same mixed-heredoc pattern — keeps the smoke checklist's literal
+          # backticks safe regardless of future content additions.
+          artifact_url="$RUN_URL#artifacts"
+          {
+            printf 'A weekly-sync candidate is ready to smoke. `personal/main` was not moved; promote with the command below after walking the smoke checklist.\n\n'
+            printf '## Artifact\n\n'
+            printf '[WarpOss-%s.zip](%s) (90-day retention)\n\n' "$ISO" "$artifact_url"
+            cat <<'EOF'
           Install:
 
-          \`\`\`sh
+          ```sh
           xattr -dr com.apple.quarantine ~/Downloads/WarpOss.app
           mv ~/Downloads/WarpOss.app /Applications/
           open /Applications/WarpOss.app
-          \`\`\`
+          ```
 
           ## Smoke checklist (docs/fork-strategy.md §6)
 
@@ -395,18 +410,14 @@ jobs:
 
           When all five smokes are green:
 
-          \`\`\`sh
-          gh workflow run promote-candidate.yml -f date=${{ steps.today.outputs.iso }}
-          \`\`\`
-
-          ## References
-
-          - Candidate branch: \`${{ steps.today.outputs.candidate }}\`
-          - \`-pre\` tag: \`${{ steps.today.outputs.pre_tag }}\`
-          - Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           EOF
-          )
+            printf '```sh\ngh workflow run promote-candidate.yml -f date=%s\n```\n\n' "$ISO"
+            printf '## References\n\n'
+            printf -- '- Candidate branch: `%s`\n' "$CANDIDATE"
+            printf -- '- `-pre` tag: `%s`\n' "$PRE_TAG"
+            printf -- '- Workflow run: %s\n' "$RUN_URL"
+          } > /tmp/issue-body.md
           gh issue create \
-            --title "Sync candidate ready: ${{ steps.today.outputs.iso }}" \
+            --title "Sync candidate ready: $ISO" \
             --label "sync-ready" \
-            --body "$body"
+            --body-file /tmp/issue-body.md
