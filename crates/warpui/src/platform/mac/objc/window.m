@@ -3,6 +3,9 @@
 #import <AppKit/NSAccessibilityConstants.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/runtime.h>
+#include <stdatomic.h>
+#include <stdint.h>
+#include <time.h>
 
 #import "alert.h"
 #import "app.h"
@@ -50,6 +53,54 @@ static void quake_diag_log_panel(const char *label, NSWindow *panel) {
 }
 
 static dispatch_once_t quakeDiagSpaceObserverOnce;
+
+// Monotonic nanosecond timestamp of the most recent
+// NSWorkspaceActiveSpaceDidChange notification, or 0 if none has fired yet.
+// Read by Rust via `quake_ms_since_space_change` to suppress the quake
+// panel's auto-hide-on-unfocus when AppKit briefly deactivates the app
+// during a Mac Space transition.
+static _Atomic int64_t quakeLastSpaceChangeNs = 0;
+
+// Monotonic nanosecond timestamp of the most recent user-initiated show
+// of the quake panel (set in `show_window_and_focus_app` whenever the
+// target window is a WarpPanel). Used together with `quakeLastSpaceChangeNs`
+// to distinguish a real Space switch / Cmd+Tab (deactivation we should
+// honor by hiding the panel synchronously) from the AppKit "settle"
+// deactivation that fires ~0.5-1.5s after a Space transition completes.
+static _Atomic int64_t quakeLastShowNs = 0;
+
+// Non-owning pointer to the quake panel, set on first `positionPinnedPanel`.
+// The quake panel is created once per app lifetime and reused, so a plain
+// pointer is safe.
+static NSWindow *gQuakePanel = nil;
+
+// Suppression window in milliseconds. Matches QUAKE_SETTLE_WINDOW_MS in the
+// Rust side. Both layers apply the same heuristic; the ObjC observer
+// catches the deactivation synchronously (pre-animation), the Rust one
+// covers the post-SpaceDidChange focus-change event.
+#define QUAKE_SETTLE_WINDOW_MS 2000
+
+static int64_t quake_monotonic_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+}
+
+// Returns true if the current moment is inside the AppKit "settle window"
+// after a user-initiated show — i.e. an active-space change fired after the
+// show, within QUAKE_SETTLE_WINDOW_MS.
+static BOOL quake_in_settle_window(void) {
+    int64_t lastShow = atomic_load_explicit(&quakeLastShowNs, memory_order_relaxed);
+    int64_t lastSpace = atomic_load_explicit(&quakeLastSpaceChangeNs, memory_order_relaxed);
+    if (lastShow == 0 || lastSpace == 0) {
+        return NO;
+    }
+    int64_t now = quake_monotonic_ns();
+    int64_t showMs = (now - lastShow) / 1000000;
+    int64_t spaceMs = (now - lastSpace) / 1000000;
+    return (showMs < QUAKE_SETTLE_WINDOW_MS) && (spaceMs < showMs);
+}
+
 static void quake_diag_install_space_observer(void) {
     dispatch_once(&quakeDiagSpaceObserverOnce, ^{
       [[[NSWorkspace sharedWorkspace] notificationCenter]
@@ -57,12 +108,79 @@ static void quake_diag_install_space_observer(void) {
                       object:nil
                        queue:[NSOperationQueue mainQueue]
                   usingBlock:^(NSNotification *note __unused) {
+                    atomic_store_explicit(&quakeLastSpaceChangeNs, quake_monotonic_ns(),
+                                          memory_order_relaxed);
                     NSLog(@"[quake-diag] NSWorkspaceActiveSpaceDidChange "
                           @"appActive=%d keyWindow=%p",
                           (int)[NSApp isActive], [NSApp keyWindow]);
                   }];
-      NSLog(@"[quake-diag] installed NSWorkspaceActiveSpaceDidChange observer");
+
+      // WillResignActive fires synchronously at the *start* of a Mac Space
+      // transition (and on Cmd+Tab). Order the panel out here so it
+      // disappears before the Space animation paints, rather than after
+      // NSWorkspaceActiveSpaceDidChange (which lands post-animation).
+      [[NSNotificationCenter defaultCenter]
+          addObserverForName:NSApplicationWillResignActiveNotification
+                      object:nil
+                       queue:[NSOperationQueue mainQueue]
+                  usingBlock:^(NSNotification *note __unused) {
+                    if (!gQuakePanel || ![gQuakePanel isVisible]) {
+                        return;
+                    }
+                    if (quake_in_settle_window()) {
+                        NSLog(@"[quake-diag] WillResignActive suppress orderOut: "
+                              @"in settle window");
+                        return;
+                    }
+                    NSLog(@"[quake-diag] WillResignActive orderOut quake panel");
+                    [gQuakePanel orderOut:nil];
+                  }];
+
+      // DidBecomeActive fires after the settle deactivation completes.
+      // If the panel is visible but lost key status during that
+      // deactivation, restore it.
+      [[NSNotificationCenter defaultCenter]
+          addObserverForName:NSApplicationDidBecomeActiveNotification
+                      object:nil
+                       queue:[NSOperationQueue mainQueue]
+                  usingBlock:^(NSNotification *note __unused) {
+                    if (!gQuakePanel || ![gQuakePanel isVisible]) {
+                        return;
+                    }
+                    if ([gQuakePanel isKeyWindow]) {
+                        return;
+                    }
+                    int64_t lastShow = atomic_load_explicit(&quakeLastShowNs,
+                                                            memory_order_relaxed);
+                    if (lastShow == 0) {
+                        return;
+                    }
+                    int64_t showMs = (quake_monotonic_ns() - lastShow) / 1000000;
+                    if (showMs < QUAKE_SETTLE_WINDOW_MS) {
+                        NSLog(@"[quake-diag] DidBecomeActive re-key quake panel "
+                              @"(showMs=%lld)", showMs);
+                        [gQuakePanel makeKeyAndOrderFront:nil];
+                    }
+                  }];
+
+      NSLog(@"[quake-diag] installed NSWorkspaceActiveSpaceDidChange + "
+            @"NSApplication active observers");
     });
+}
+
+// Exported for Rust: milliseconds elapsed since the last
+// NSWorkspaceActiveSpaceDidChange notification, or INT64_MAX if none has
+// fired in this process yet. Used by `update_quake_mode_state` to skip
+// the auto-hide-on-unfocus path during the post-Space-change focus
+// settle, where AppKit briefly reports the panel as not key even though
+// the user did not deliberately switch away from it.
+int64_t quake_ms_since_space_change(void) {
+    int64_t lastNs = atomic_load_explicit(&quakeLastSpaceChangeNs, memory_order_relaxed);
+    if (lastNs == 0) {
+        return INT64_MAX;
+    }
+    int64_t deltaNs = quake_monotonic_ns() - lastNs;
+    return deltaNs / 1000000;
 }
 // === end quake-mode-spaces diagnostic instrumentation =====================
 
@@ -703,6 +821,8 @@ void init_warp_nswindow(NSWindow<WarpWindowProtocol> *window, bool testMode, boo
 
 - (void)positionPinnedPanel {
     quake_diag_install_space_observer();
+    gQuakePanel = self;
+    atomic_store_explicit(&quakeLastShowNs, quake_monotonic_ns(), memory_order_relaxed);
     quake_diag_log_panel("positionPinnedPanel:enter", self);
     previouslyActiveAppPID = [PreviousStateHelper storePreviousState];
 
@@ -710,9 +830,18 @@ void init_warp_nswindow(NSWindow<WarpWindowProtocol> *window, bool testMode, boo
     // windows but also not overlap with user's dock, menu bar, spotlight and Raycast.
     self.level = NSFloatingWindowLevel;
 
-    // These collectionBehavior makes sure the panel could join fullscreen space.
+    // Collection behavior tuned for "hide synchronously when the user leaves
+    // the panel's Space" semantics:
+    //   * MoveToActiveSpace — AppKit re-homes the panel onto the currently
+    //     active Space whenever we call orderFront:/makeKeyAndOrderFront:,
+    //     so the hotkey opens it on whichever Space the user is on. This
+    //     replaces CanJoinAllSpaces, which kept the panel composited onto
+    //     every Space and caused it to flash through the destination Space
+    //     during the Mac Space-switch animation.
+    //   * FullScreenAuxiliary — the panel can still appear over fullscreen
+    //     apps when invoked.
     self.collectionBehavior =
-        (self.collectionBehavior | NSWindowCollectionBehaviorCanJoinAllSpaces |
+        (self.collectionBehavior | NSWindowCollectionBehaviorMoveToActiveSpace |
          NSWindowCollectionBehaviorFullScreenAuxiliary);
 
     [self setMovable:NO];
@@ -1020,6 +1149,10 @@ void activate_app() {
 
 void show_window_and_focus_app(WarpWindow<WarpWindowProtocol> *window, bool bringToFront) {
     quake_diag_log_panel("show_window_and_focus_app:enter", window);
+    if ([window isKindOfClass:[WarpPanel class]]) {
+        gQuakePanel = window;
+        atomic_store_explicit(&quakeLastShowNs, quake_monotonic_ns(), memory_order_relaxed);
+    }
     previouslyActiveAppPID = [PreviousStateHelper storePreviousState];
 
     // Make sure the window is included in the application's window list.  This

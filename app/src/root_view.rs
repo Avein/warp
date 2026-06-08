@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use cfg_if::cfg_if;
@@ -115,6 +116,19 @@ use crate::{
 
 const WINDOW_TITLE: &str = "Warp";
 
+// Window (ms) after a user-initiated quake show during which an
+// `NSWorkspaceActiveSpaceDidChange` is treated as the "settle" notification
+// AppKit emits ~0.5-1.5s after a Mac Space transition completes. The settle
+// transiently deactivates the app and clears `active_window_id`, which our
+// `Open` -> `Hidden` auto-hide would otherwise interpret as a real focus
+// loss — producing a one-frame "blink" of the panel the user just opened on
+// the destination Space.
+const QUAKE_SETTLE_WINDOW_MS: i64 = 2000;
+
+extern "C" {
+    fn quake_ms_since_space_change() -> i64;
+}
+
 lazy_static! {
     static ref FALLBACK_WINDOW_SIZE: Vector2F = vec2f(800.0, 600.0);
     static ref QUAKE_STATE: Arc<Mutex<Option<QuakeModeState>>> = Arc::new(Mutex::new(None));
@@ -158,6 +172,11 @@ pub struct QuakeModeState {
     /// Note that this is not necessarily the screen quake mode lives in if user
     /// set a specific pinned screen.
     active_display_id: DisplayId,
+    /// Timestamp of the most recent user-initiated show (toggle Show arm or
+    /// initial create). Used by `update_quake_mode_state` to identify and
+    /// ignore the post-Space-change settle event that fires after the user
+    /// opens the panel on a destination Space.
+    last_show_at: Option<Instant>,
 }
 
 /// Configuration for the new quake mode window including the active screen id and the window bound.
@@ -1135,6 +1154,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                         window_state: WindowState::Hidden,
                         window_id: id,
                         active_display_id: frame_args.display_id,
+                        last_show_at: None,
                     });
                 } else {
                     if app_state.active_window_index == Some(idx) {
@@ -1705,6 +1725,24 @@ fn fit_quake_mode_window_within_active_screen(
     }
 }
 
+/// Returns true if the panel was shown recently AND an
+/// `NSWorkspaceActiveSpaceDidChange` notification fired between the show and
+/// now. This is the AppKit "settle" event that lands ~0.5-1.5s after a Mac
+/// Space transition completes; treating its focus-loss as user intent would
+/// hide the panel the user just opened on the destination Space.
+fn is_space_change_settle(last_show_at: Option<Instant>) -> bool {
+    let Some(last_show) = last_show_at else {
+        return false;
+    };
+    let show_age_ms = last_show.elapsed().as_millis() as i64;
+    if show_age_ms >= QUAKE_SETTLE_WINDOW_MS {
+        return false;
+    }
+    let space_change_ago_ms = unsafe { quake_ms_since_space_change() };
+    // Space change happened *after* the show, within the settle window.
+    space_change_ago_ms < show_age_ms
+}
+
 fn update_quake_mode_state(arg: &UpdateQuakeModeEventArg, ctx: &mut AppContext) {
     let hide_on_unfocus = KeysSettings::as_ref(ctx)
         .quake_mode_settings
@@ -1727,6 +1765,12 @@ fn update_quake_mode_state(arg: &UpdateQuakeModeEventArg, ctx: &mut AppContext) 
                 WindowState::PendingOpen => WindowState::Open,
                 WindowState::Open => {
                     if arg.active_window_id.is_some_and(|id| id == state.window_id) {
+                        WindowState::Open
+                    } else if is_space_change_settle(state.last_show_at) {
+                        log::info!(
+                            "[quake-diag] update_quake_mode_state suppress hide: \
+                            Space-change settle within {QUAKE_SETTLE_WINDOW_MS}ms of show",
+                        );
                         WindowState::Open
                     } else {
                         ctx.windows().hide_window(state.window_id);
@@ -1767,11 +1811,14 @@ fn get_quake_mode_state(ctx: &mut AppContext) -> Option<QuakeModeState> {
 fn toggle_quake_mode_window(global_resource_handles: &GlobalResourceHandles, ctx: &mut AppContext) {
     // Get the current state of quake mode.
     let state = get_quake_mode_state(ctx);
+    // Snapshot the active window *now* so the toggle race-window check
+    // (the second guard below) is consistent with what we logged.
+    let active_window_id = ctx.windows().active_window();
     log::info!(
         "[quake-diag] toggle_quake_mode_window enter \
         state={:?} active_window_id={:?} active_display_id={:?}",
         state.as_ref().map(|s| s.window_state.clone()),
-        ctx.windows().active_window(),
+        active_window_id,
         ctx.windows().active_display_id(),
     );
     match state {
@@ -1824,11 +1871,25 @@ fn toggle_quake_mode_window(global_resource_handles: &GlobalResourceHandles, ctx
                 window_state: WindowState::PendingOpen,
                 window_id: id,
                 active_display_id: config.display_id,
+                last_show_at: Some(Instant::now()),
             });
         }
-        Some(state) if matches!(state.window_state, WindowState::Hidden) => {
+        // Show arm: the panel is hidden, OR the cached state says Open/Pending
+        // but the panel is not the currently active window. The second case is
+        // the post-Space-switch race window: AppKit transiently strips key
+        // status from the panel during a Mac Space transition, our auto-hide
+        // event is in flight, and a fast hotkey press would otherwise read
+        // stale `Open` and take the hide arm — producing the "panel blinks,
+        // takes 2 presses to stay" symptom. Treating that case as "show"
+        // collapses the race onto the correct user intent (bring the panel
+        // up on the current Space).
+        Some(state)
+            if matches!(state.window_state, WindowState::Hidden)
+                || active_window_id != Some(state.window_id) =>
+        {
             log::info!(
-                "[quake-diag] toggle arm=Hidden (show window_id={:?})",
+                "[quake-diag] toggle arm=Show (state={:?} window_id={:?})",
+                state.window_state,
                 state.window_id,
             );
             send_telemetry_from_app_ctx!(TelemetryEvent::OpenQuakeModeWindow, ctx);
@@ -1855,15 +1916,19 @@ fn toggle_quake_mode_window(global_resource_handles: &GlobalResourceHandles, ctx
 
             if let Some(state) = quake_mode_state.as_mut() {
                 state.window_state = WindowState::PendingOpen;
+                state.last_show_at = Some(Instant::now());
                 log::info!(
-                    "[quake-diag] toggle arm=Hidden post-show state -> PendingOpen window_id={:?}",
+                    "[quake-diag] toggle arm=Show post-show state -> PendingOpen window_id={:?}",
                     state.window_id,
                 );
             }
         }
+        // Hide arm: state says Open/Pending AND the panel is the currently
+        // active window — i.e. the user is interacting with the panel and
+        // wants to dismiss it.
         Some(state) => {
             log::info!(
-                "[quake-diag] toggle arm=Open/Pending (hide window_id={:?} state={:?})",
+                "[quake-diag] toggle arm=Hide (window_id={:?} state={:?})",
                 state.window_id,
                 state.window_state,
             );
@@ -1875,7 +1940,7 @@ fn toggle_quake_mode_window(global_resource_handles: &GlobalResourceHandles, ctx
             if let Some(state) = quake_mode_state.as_mut() {
                 state.window_state = WindowState::Hidden;
                 log::info!(
-                    "[quake-diag] toggle arm=Open/Pending post-hide state -> Hidden window_id={:?}",
+                    "[quake-diag] toggle arm=Hide post-hide state -> Hidden window_id={:?}",
                     state.window_id,
                 );
             }
