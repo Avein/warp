@@ -1652,6 +1652,11 @@ pub fn quake_mode_window_id() -> Option<WindowId> {
 
 pub fn set_quake_mode(new_state: Option<QuakeModeState>) {
     let mut quake_mode_state = QUAKE_STATE.lock();
+    log::info!(
+        "[quake-diag] set_quake_mode old={:?} new={:?}",
+        quake_mode_state.as_ref().map(|s| s.window_state.clone()),
+        new_state.as_ref().map(|s| s.window_state.clone()),
+    );
     *quake_mode_state = new_state;
 }
 
@@ -1701,10 +1706,15 @@ fn fit_quake_mode_window_within_active_screen(
 }
 
 fn update_quake_mode_state(arg: &UpdateQuakeModeEventArg, ctx: &mut AppContext) {
-    if !KeysSettings::as_ref(ctx)
+    let hide_on_unfocus = KeysSettings::as_ref(ctx)
         .quake_mode_settings
-        .hide_window_when_unfocused
-    {
+        .hide_window_when_unfocused;
+    log::info!(
+        "[quake-diag] update_quake_mode_state enter active_window_id={:?} hide_on_unfocus={}",
+        arg.active_window_id,
+        hide_on_unfocus,
+    );
+    if !hide_on_unfocus {
         return;
     }
 
@@ -1712,7 +1722,8 @@ fn update_quake_mode_state(arg: &UpdateQuakeModeEventArg, ctx: &mut AppContext) 
         let mut quake_mode_state = QUAKE_STATE.lock();
 
         if let Some(state) = quake_mode_state.as_mut() {
-            state.window_state = match state.window_state {
+            let before = state.window_state.clone();
+            state.window_state = match state.window_state.clone() {
                 WindowState::PendingOpen => WindowState::Open,
                 WindowState::Open => {
                     if arg.active_window_id.is_some_and(|id| id == state.window_id) {
@@ -1723,7 +1734,15 @@ fn update_quake_mode_state(arg: &UpdateQuakeModeEventArg, ctx: &mut AppContext) 
                     }
                 }
                 WindowState::Hidden => WindowState::Hidden,
-            }
+            };
+            log::info!(
+                "[quake-diag] update_quake_mode_state transition state_window_id={:?} {:?} -> {:?}",
+                state.window_id,
+                before,
+                state.window_state,
+            );
+        } else {
+            log::info!("[quake-diag] update_quake_mode_state no-state");
         }
     }
 }
@@ -1748,8 +1767,16 @@ fn get_quake_mode_state(ctx: &mut AppContext) -> Option<QuakeModeState> {
 fn toggle_quake_mode_window(global_resource_handles: &GlobalResourceHandles, ctx: &mut AppContext) {
     // Get the current state of quake mode.
     let state = get_quake_mode_state(ctx);
+    log::info!(
+        "[quake-diag] toggle_quake_mode_window enter \
+        state={:?} active_window_id={:?} active_display_id={:?}",
+        state.as_ref().map(|s| s.window_state.clone()),
+        ctx.windows().active_window(),
+        ctx.windows().active_display_id(),
+    );
     match state {
         None => {
+            log::info!("[quake-diag] toggle arm=None (create new panel)");
             send_telemetry_from_app_ctx!(TelemetryEvent::OpenQuakeModeWindow, ctx);
 
             let config = quake_mode_config(
@@ -1800,6 +1827,10 @@ fn toggle_quake_mode_window(global_resource_handles: &GlobalResourceHandles, ctx
             });
         }
         Some(state) if matches!(state.window_state, WindowState::Hidden) => {
+            log::info!(
+                "[quake-diag] toggle arm=Hidden (show window_id={:?})",
+                state.window_id,
+            );
             send_telemetry_from_app_ctx!(TelemetryEvent::OpenQuakeModeWindow, ctx);
 
             // If quake mode does not have a set pin screen -- move it to the current active screen.
@@ -1824,9 +1855,18 @@ fn toggle_quake_mode_window(global_resource_handles: &GlobalResourceHandles, ctx
 
             if let Some(state) = quake_mode_state.as_mut() {
                 state.window_state = WindowState::PendingOpen;
+                log::info!(
+                    "[quake-diag] toggle arm=Hidden post-show state -> PendingOpen window_id={:?}",
+                    state.window_id,
+                );
             }
         }
         Some(state) => {
+            log::info!(
+                "[quake-diag] toggle arm=Open/Pending (hide window_id={:?} state={:?})",
+                state.window_id,
+                state.window_state,
+            );
             ctx.windows().hide_window(state.window_id);
 
             // Update quake mode state after the call to prevent deadlocking.
@@ -1834,6 +1874,10 @@ fn toggle_quake_mode_window(global_resource_handles: &GlobalResourceHandles, ctx
 
             if let Some(state) = quake_mode_state.as_mut() {
                 state.window_state = WindowState::Hidden;
+                log::info!(
+                    "[quake-diag] toggle arm=Open/Pending post-hide state -> Hidden window_id={:?}",
+                    state.window_id,
+                );
             }
         }
     };
