@@ -20,6 +20,7 @@ use crate::settings_view::SettingsSection;
 use crate::tab::SelectedTabColor;
 use crate::terminal::ShellLaunchData;
 use crate::themes::theme::AnsiColorIdentifier;
+use crate::workspace::tab_group::TabGroupId;
 use crate::workspace::view::left_panel::ToolPanelView;
 use crate::workspace::{ProjectIdentity, WorkspaceRegistry};
 
@@ -63,6 +64,17 @@ pub struct WindowSnapshot {
     /// pill shows the identity-derived name. Workspace-scoped: when the tab is
     /// closed, this disappears with it (per `docs/projects-rename.md`).
     pub display_name_override: Option<String>,
+    /// Tab groups defined in this window. Group order is implicit from
+    /// member tabs' positions, so no explicit ordering is persisted.
+    pub tab_groups: Vec<TabGroupSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabGroupSnapshot {
+    pub id: TabGroupId,
+    pub name: Option<String>,
+    pub color: SelectedTabColor,
+    pub collapsed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -73,6 +85,8 @@ pub struct TabSnapshot {
     pub selected_color: SelectedTabColor,
     pub left_panel: Option<LeftPanelSnapshot>,
     pub right_panel: Option<RightPanelSnapshot>,
+    /// Tab group this tab belongs to, if any.
+    pub group_id: Option<TabGroupId>,
 }
 
 impl TabSnapshot {

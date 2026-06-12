@@ -30,7 +30,7 @@ pub use local_command_executor::LocalCommandExecutor;
 pub use noop_command_executor::NoOpCommandExecutor;
 #[cfg(feature = "local_tty")]
 pub use remote_command_executor::RemoteCommandExecutor;
-pub use shared::{shell_escape_single_quotes, ExecutorCommandEvent};
+pub use shared::{shell_escape_single_quotes, shell_quote_arg, ExecutorCommandEvent};
 use warp_completer::completer::CommandOutput;
 use warpui::ModelContext;
 
@@ -313,7 +313,8 @@ fn new_command_executor_for_local_tty_session(
                 && !FeatureFlag::InBandGeneratorsForSSH.is_enabled()
                 && !force_use_in_band_generators =>
         {
-            if let IsLegacySSHSession::Yes { socket_path } = &session_info.is_legacy_ssh_session {
+            if let IsLegacySSHSession::Yes { socket_path, .. } = &session_info.is_legacy_ssh_session
+            {
                 let wsl_distro = parent_session_info
                     .and_then(|session| session.wsl_name())
                     .map(ToOwned::to_owned);
