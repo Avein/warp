@@ -34,8 +34,7 @@ use warpui::rendering::OnGPUDeviceSelected;
 use warpui::windowing::WindowManager;
 use warpui::{
     id, AddWindowOptions, AppContext, DisplayId, Element, Entity, EntityId, FocusContext,
-    NextNewWindowsHasThisWindowsBoundsUponClose, SingletonEntity, TypedActionView, View,
-    ViewContext, ViewHandle, WindowId,
+    SingletonEntity, TypedActionView, View, ViewContext, ViewHandle, WindowId,
 };
 
 use crate::ai::agent::api::ServerConversationToken;
@@ -763,11 +762,35 @@ fn focus_or_spawn_project(arg: &FocusOrSpawnProjectArg, ctx: &mut AppContext) {
         }
     }
 
-    // No active window to host the tab: spawn a fresh window and stamp its active workspace.
+    // No active window to host the tab. In the single-window model the panel-style host window
+    // is the home for project tabs: reuse it when it's still alive (the app may merely be
+    // inactive, e.g. a `warp://` URI arriving in the background), otherwise create it fresh
+    // from this project's template.
+    if let Some(state) = get_quake_mode_state(ctx) {
+        let root_view: Option<ViewHandle<RootView>> = ctx.root_view(state.window_id);
+        if let Some(root_view) = root_view {
+            root_view.update(ctx, |root_view, ctx| {
+                root_view.open_project_tab(window_template, identity, ctx);
+            });
+            ctx.windows().show_window_and_focus_app(state.window_id);
+            // Mirror the toggle's Show arm so `QUAKE_STATE` matches the now-visible panel;
+            // leaving it `Hidden` would desync the hotkey's next toggle decision.
+            {
+                let mut quake_mode_state = QUAKE_STATE.lock();
+                if let Some(state) = quake_mode_state.as_mut() {
+                    state.window_state = WindowState::PendingOpen;
+                    state.last_show_at = Some(Instant::now());
+                }
+            }
+            persist_project_tab_opened_into_existing_window(ctx);
+            return;
+        }
+    }
+
     // The save dispatch on this branch is already covered by `on_new_window_requested`'s
     // `PersistedStateMutation::NewOsWindowOpened` save — no extra dispatch needed here.
     let (window_id, _) =
-        open_new_with_workspace_source(NewWorkspaceSource::FromTemplate { window_template }, ctx);
+        open_panel_with_workspace_source(NewWorkspaceSource::FromTemplate { window_template }, ctx);
     if let Some(workspace_id) = WorkspaceRegistry::as_ref(ctx).active_id(window_id) {
         ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| {
             switcher.stamp(workspace_id, identity);
@@ -878,6 +901,20 @@ fn home_dir() -> PathBuf {
 /// [`focus_or_spawn_project`]. Not backed by any `root.yaml` — root is purely runtime-synthetic.
 pub(crate) fn synthetic_root_config() -> launch_config::LaunchConfig {
     launch_config::LaunchConfig::single_pane("root".to_string(), home_dir())
+}
+
+/// Matches the `ProjectIdentity` stamp that `focus_or_spawn_project` produces for
+/// `synthetic_root_config()`. Used by the restore path to repair normal-window snapshots that
+/// reach disk with `project_identity = None` — without this the workspace comes back unstamped
+/// and renders a blank pill (no `root` label, no projects-palette / Alt+Tab entry).
+fn synthetic_root_identity() -> ProjectIdentity {
+    ProjectIdentity {
+        name: "root".to_string(),
+        path: home_dir(),
+        origin: ProjectOrigin::Config {
+            config_name: "root".to_string(),
+        },
+    }
 }
 
 /// Spawns the synthetic-root project: a [`ProjectOrigin::Config`] tab named `root` at the user's
@@ -1088,162 +1125,78 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
     if let Some(app_state) = &arg.app_state {
         maybe_register_global_window_shortcuts(global_resource_handles.clone(), ctx);
 
-        let (background_blur_radius_pixels, background_blur_texture) = {
-            let window_settings = WindowSettings::as_ref(ctx);
-            (
-                Some(*window_settings.background_blur_radius),
-                *window_settings.background_blur_texture,
-            )
-        };
-
         // Check whether user has enabled session restoration.
         if *GeneralSettings::as_ref(ctx).restore_session {
-            // Quake windows stay as their own hidden window; normal (project) windows are collected
-            // and then restored as project-tabs inside a single host window rather than as separate
-            // OS windows.
-            let mut normal_windows: Vec<&WindowSnapshot> = Vec::new();
-            let mut active_normal_pos: Option<usize> = None;
+            // Single-window model: every persisted row is restored as a project-tab inside ONE
+            // panel-style host window, and the quake hotkey shows/hides that same window — there
+            // is no separate scratch quake terminal anymore. (The host must be panel-style from
+            // birth: `WindowStyle::Pin` maps to a different native window class — NSPanel — that
+            // an existing normal window cannot be converted into at runtime.)
+            //
+            // Row hygiene while gathering, covering transitional rows from earlier sessions:
+            // - identity-less quake rows are the old scratch hotkey panel — dropped; the panel
+            //   now hosts the project tabs instead.
+            // - identity-less normal rows are repaired to the synthetic-root identity so the
+            //   user lands on a labelled `root` tab, not a blank pill.
+            // - rows are deduped by identity name (first wins): older builds could persist the
+            //   same project both as a normal row and a stale quake row.
+            let mut seen_names = std::collections::HashSet::new();
+            let mut snapshots: Vec<WindowSnapshot> = Vec::new();
+            let mut active_pos: Option<usize> = None;
             for (idx, window) in app_state.windows.iter().enumerate() {
-                // If this window is a quake window, hide it by default.
-                if window.quake_mode {
-                    // If this is Windows, skip restoring the quake window. Creating a hidden window
-                    // is not supported on Windows. We can't have the quake window visible on
-                    // startup or else it will get mistaken for a normal window.
-                    if cfg!(windows) {
+                let mut snapshot = window.clone();
+                if snapshot.project_identity.is_none() {
+                    if snapshot.quake_mode {
                         continue;
                     }
-                    let frame_args = quake_mode_config(
-                        &KeysSettings::as_ref(ctx)
-                            .quake_mode_settings
-                            .value()
-                            .clone(),
-                        ctx,
-                    );
-
-                    let (id, _) = ctx.add_window(
-                        AddWindowOptions {
-                            window_style: WindowStyle::Pin,
-                            window_bounds: WindowBounds::ExactPosition(frame_args.window_bounds),
-                            title: Some("Warp".to_owned()),
-                            fullscreen_state: window.fullscreen_state,
-                            background_blur_radius_pixels,
-                            background_blur_texture,
-                            // Don't use the quake window for positioning new windows.
-                            anchor_new_windows_from_closed_position:
-                                NextNewWindowsHasThisWindowsBoundsUponClose::No,
-                            on_gpu_driver_selected: on_gpu_driver_selected_callback(),
-                            window_instance: Some(ChannelState::app_id().to_string() + "-hotkey"),
-                        },
-                        |ctx| {
-                            let mut view = RootView::new(
-                                global_resource_handles.clone(),
-                                NewWorkspaceSource::Restored {
-                                    window_snapshot: window.clone(),
-                                    block_lists: app_state.block_lists.clone(),
-                                },
-                                ctx,
-                            );
-                            view.focus(ctx);
-                            view
-                        },
-                    );
-                    ctx.windows().hide_window(id);
-
-                    let mut quake_mode_state = QUAKE_STATE.lock();
-                    *quake_mode_state = Some(QuakeModeState {
-                        window_state: WindowState::Hidden,
-                        window_id: id,
-                        active_display_id: frame_args.display_id,
-                        last_show_at: None,
-                    });
-                } else {
-                    if app_state.active_window_index == Some(idx) {
-                        active_normal_pos = Some(normal_windows.len());
-                    }
-                    normal_windows.push(window);
+                    snapshot.project_identity = Some(synthetic_root_identity());
                 }
+                let name = snapshot
+                    .project_identity
+                    .as_ref()
+                    .expect("identity assigned above")
+                    .name
+                    .clone();
+                if !seen_names.insert(name) {
+                    continue;
+                }
+                if app_state.active_window_index == Some(idx) {
+                    active_pos = Some(snapshots.len());
+                }
+                snapshots.push(snapshot);
             }
 
-            if normal_windows.is_empty() && !app_state.windows.is_empty() {
-                // Only the quake-mode window was restored (it starts hidden); create a visible
-                // normal window so something shows on startup.
-                //
-                // The `!app_state.windows.is_empty()` guard scopes this fallback to its original
-                // intent — at least one window was persisted but all of them were quake. When
-                // `app_state.windows` is fully empty (first launch, post-state-wipe, or an empty
-                // persisted snapshot), we deliberately create nothing here and let `launch()`'s
-                // `root_view:spawn_synthetic_root` dispatch own the empty-state path. Without
-                // this guard, this branch would create a plain `Empty` window with no
-                // `project_identity`, `launch()`'s `ctx.window_ids().count() == 0` check would
-                // see the window and skip the synthetic-root spawn, and the user would land on a
-                // blank `project`-labelled pill on every fresh launch (see
-                // `feat(projects-origin): synthetic root auto-spawn` for the launch-time pairing).
-                let window_settings = WindowSettings::as_ref(ctx);
-                let options = default_window_options(window_settings, ctx);
-                ctx.add_window(options, |ctx| {
-                    let mut view = RootView::new(
-                        global_resource_handles.clone(),
-                        NewWorkspaceSource::Empty {
-                            previous_active_window: None,
-                            shell: None,
-                        },
-                        ctx,
-                    );
-                    view.focus(ctx);
-                    view
-                });
-            } else if !normal_windows.is_empty() {
-                // Open the OS window with the previously-active workspace's bounds/fullscreen
-                // (where the user was last working) but seed it with `normal_windows[0]` so the
-                // project-tab strip starts in *saved* order. Append the rest of the strip in
-                // saved order, then activate `host_pos` independently. Without this separation
-                // the active-at-quit tab always landed at strip index 0 on restore (because
-                // `WorkspaceRegistry::register` makes the first registered workspace active),
-                // and the strip silently rotated on every active-tab-change-then-quit cycle.
-                let host_pos = active_normal_pos.unwrap_or(0);
-                let host_snapshot = normal_windows[host_pos];
-                let first_snapshot = normal_windows[0];
-                let (_, host_root_view) = ctx.add_window(
-                    AddWindowOptions {
-                        window_bounds: WindowBounds::new(host_snapshot.bounds),
-                        title: Some("Warp".to_owned()),
-                        fullscreen_state: host_snapshot.fullscreen_state,
-                        background_blur_radius_pixels,
-                        background_blur_texture,
-                        on_gpu_driver_selected: on_gpu_driver_selected_callback(),
-                        ..Default::default()
+            // Nothing restorable leaves zero windows; `launch()` then dispatches
+            // `root_view:spawn_synthetic_root`, which builds the panel with a fresh root tab.
+            if let Some(first_snapshot) = snapshots.first().cloned() {
+                // Seed with `snapshots[0]` so the project-tab strip starts in *saved* order, then
+                // activate `active_pos` independently. Without this separation the active-at-quit
+                // tab always landed at strip index 0 on restore (because
+                // `WorkspaceRegistry::register` makes the first registered workspace active), and
+                // the strip silently rotated on every active-tab-change-then-quit cycle.
+                let block_lists = app_state.block_lists.clone();
+                let (_, host_root_view) = open_panel_with_workspace_source(
+                    NewWorkspaceSource::Restored {
+                        window_snapshot: first_snapshot,
+                        block_lists,
                     },
-                    |ctx| {
-                        let mut view = RootView::new(
-                            global_resource_handles.clone(),
-                            NewWorkspaceSource::Restored {
-                                window_snapshot: first_snapshot.clone(),
-                                block_lists: app_state.block_lists.clone(),
-                            },
-                            ctx,
-                        );
-                        view.focus(ctx);
-                        view
-                    },
+                    ctx,
                 );
 
-                for window in normal_windows.iter().skip(1) {
-                    let window_snapshot = (*window).clone();
+                for snapshot in snapshots.iter().skip(1) {
+                    let window_snapshot = snapshot.clone();
                     let block_lists = app_state.block_lists.clone();
                     host_root_view.update(ctx, |root_view, ctx| {
                         root_view.restore_project_tab(window_snapshot, block_lists, ctx);
                     });
                 }
 
-                // `WorkspaceRegistry::register` marks the first registered workspace as active —
-                // that's `normal_windows[0]` per the seed above. When the user's previously-active
-                // tab was at a different index, re-activate it now that the strip is populated.
-                if host_pos != 0 {
+                if let Some(pos) = active_pos.filter(|pos| *pos != 0) {
                     host_root_view.update(ctx, |root_view, ctx| {
                         let window_id = ctx.window_id();
                         let host_workspace_id = WorkspaceRegistry::as_ref(ctx)
                             .workspaces_for_window(window_id, ctx)
-                            .get(host_pos)
+                            .get(pos)
                             .map(|w| w.id());
                         if let Some(host_id) = host_workspace_id {
                             root_view.activate_project_tab(&host_id, ctx);
@@ -1276,6 +1229,66 @@ pub(crate) fn open_new_with_workspace_source(
         view.focus(ctx);
         view
     })
+}
+
+/// Opens the single panel-style host window — the one the quake hotkey shows/hides — with the
+/// workspace configured according to `source`, and registers it in `QUAKE_STATE`. The window is
+/// visible and focused on return: it doubles as the app's main window, so launch-time callers
+/// want the user to land in it.
+///
+/// The panel must be created as a panel: `WindowStyle::Pin` selects a different native window
+/// class (NSPanel on macOS, carrying the move-to-active-Space behavior), so an existing normal
+/// window cannot be converted after the fact.
+fn open_panel_with_workspace_source(
+    source: NewWorkspaceSource,
+    ctx: &mut AppContext,
+) -> (WindowId, ViewHandle<RootView>) {
+    let global_resource_handles = GlobalResourceHandlesProvider::as_ref(ctx).get().clone();
+    let config = quake_mode_config(
+        &KeysSettings::as_ref(ctx)
+            .quake_mode_settings
+            .value()
+            .clone(),
+        ctx,
+    );
+    let (background_blur_radius_pixels, background_blur_texture) = {
+        let window_settings = WindowSettings::as_ref(ctx);
+        (
+            Some(*window_settings.background_blur_radius),
+            *window_settings.background_blur_texture,
+        )
+    };
+    let (id, root_view) = ctx.add_window(
+        AddWindowOptions {
+            window_style: WindowStyle::Pin,
+            window_bounds: WindowBounds::ExactPosition(config.window_bounds),
+            title: Some("Warp".to_owned()),
+            background_blur_radius_pixels,
+            background_blur_texture,
+            // Don't use the panel for positioning new windows.
+            anchor_new_windows_from_closed_position:
+                warpui::NextNewWindowsHasThisWindowsBoundsUponClose::No,
+            on_gpu_driver_selected: on_gpu_driver_selected_callback(),
+            window_instance: Some(ChannelState::app_id().to_string() + "-hotkey"),
+            ..Default::default()
+        },
+        |ctx| {
+            let mut view = RootView::new(global_resource_handles, source, ctx);
+            view.focus(ctx);
+            view
+        },
+    );
+    // Update quake mode state after the `add_window` call to prevent deadlocking. `PendingOpen`
+    // (not `Open`): launch delivers focus events with a `None` active window before the panel
+    // becomes key, and an `Open` panel that isn't the active window gets auto-hidden by
+    // `update_quake_mode_state`.
+    set_quake_mode(Some(QuakeModeState {
+        window_state: WindowState::PendingOpen,
+        window_id: id,
+        active_display_id: config.display_id,
+        last_show_at: Some(Instant::now()),
+    }));
+    (id, root_view)
 }
 
 pub(crate) fn open_new_from_path(
@@ -1672,11 +1685,6 @@ pub fn quake_mode_window_id() -> Option<WindowId> {
 
 pub fn set_quake_mode(new_state: Option<QuakeModeState>) {
     let mut quake_mode_state = QUAKE_STATE.lock();
-    log::info!(
-        "[quake-diag] set_quake_mode old={:?} new={:?}",
-        quake_mode_state.as_ref().map(|s| s.window_state.clone()),
-        new_state.as_ref().map(|s| s.window_state.clone()),
-    );
     *quake_mode_state = new_state;
 }
 
@@ -1747,11 +1755,6 @@ fn update_quake_mode_state(arg: &UpdateQuakeModeEventArg, ctx: &mut AppContext) 
     let hide_on_unfocus = KeysSettings::as_ref(ctx)
         .quake_mode_settings
         .hide_window_when_unfocused;
-    log::info!(
-        "[quake-diag] update_quake_mode_state enter active_window_id={:?} hide_on_unfocus={}",
-        arg.active_window_id,
-        hide_on_unfocus,
-    );
     if !hide_on_unfocus {
         return;
     }
@@ -1760,17 +1763,24 @@ fn update_quake_mode_state(arg: &UpdateQuakeModeEventArg, ctx: &mut AppContext) 
         let mut quake_mode_state = QUAKE_STATE.lock();
 
         if let Some(state) = quake_mode_state.as_mut() {
-            let before = state.window_state.clone();
             state.window_state = match state.window_state.clone() {
-                WindowState::PendingOpen => WindowState::Open,
-                WindowState::Open => {
+                // Promote to `Open` only once the panel has actually become the active window.
+                // Launch and Space-switch churn deliver focus events (often with a `None`
+                // active window) before the freshly-shown panel gains key status; promoting on
+                // one of those would let the *next* event auto-hide a panel the user never
+                // interacted with. At launch — where several `active window changed: None`
+                // events fire back-to-back — that hid the single host window immediately.
+                WindowState::PendingOpen => {
                     if arg.active_window_id.is_some_and(|id| id == state.window_id) {
                         WindowState::Open
-                    } else if is_space_change_settle(state.last_show_at) {
-                        log::info!(
-                            "[quake-diag] update_quake_mode_state suppress hide: \
-                            Space-change settle within {QUAKE_SETTLE_WINDOW_MS}ms of show",
-                        );
+                    } else {
+                        WindowState::PendingOpen
+                    }
+                }
+                WindowState::Open => {
+                    if arg.active_window_id.is_some_and(|id| id == state.window_id)
+                        || is_space_change_settle(state.last_show_at)
+                    {
                         WindowState::Open
                     } else {
                         ctx.windows().hide_window(state.window_id);
@@ -1779,14 +1789,6 @@ fn update_quake_mode_state(arg: &UpdateQuakeModeEventArg, ctx: &mut AppContext) 
                 }
                 WindowState::Hidden => WindowState::Hidden,
             };
-            log::info!(
-                "[quake-diag] update_quake_mode_state transition state_window_id={:?} {:?} -> {:?}",
-                state.window_id,
-                before,
-                state.window_state,
-            );
-        } else {
-            log::info!("[quake-diag] update_quake_mode_state no-state");
         }
     }
 }
@@ -1808,71 +1810,35 @@ fn get_quake_mode_state(ctx: &mut AppContext) -> Option<QuakeModeState> {
     }
 }
 
-fn toggle_quake_mode_window(global_resource_handles: &GlobalResourceHandles, ctx: &mut AppContext) {
+fn toggle_quake_mode_window(
+    _global_resource_handles: &GlobalResourceHandles,
+    ctx: &mut AppContext,
+) {
     // Get the current state of quake mode.
     let state = get_quake_mode_state(ctx);
-    // Snapshot the active window *now* so the toggle race-window check
-    // (the second guard below) is consistent with what we logged.
+    // Snapshot the active window once so the show/hide arm selection below is
+    // consistent even if focus shifts mid-toggle.
     let active_window_id = ctx.windows().active_window();
-    log::info!(
-        "[quake-diag] toggle_quake_mode_window enter \
-        state={:?} active_window_id={:?} active_display_id={:?}",
-        state.as_ref().map(|s| s.window_state.clone()),
-        active_window_id,
-        ctx.windows().active_display_id(),
-    );
     match state {
         None => {
-            log::info!("[quake-diag] toggle arm=None (create new panel)");
             send_telemetry_from_app_ctx!(TelemetryEvent::OpenQuakeModeWindow, ctx);
 
-            let config = quake_mode_config(
-                &KeysSettings::as_ref(ctx)
-                    .quake_mode_settings
-                    .value()
-                    .clone(),
+            // Single-window model: the panel hosts the project tabs, so a missing panel is
+            // recreated with the synthetic-root project rather than an unstamped empty tab.
+            // `open_panel_with_workspace_source` registers the new window in `QUAKE_STATE`.
+            let launch_config = synthetic_root_config();
+            let Some(window_template) = launch_config.windows.first().cloned() else {
+                return;
+            };
+            let (window_id, _) = open_panel_with_workspace_source(
+                NewWorkspaceSource::FromTemplate { window_template },
                 ctx,
             );
-
-            let window_settings = WindowSettings::as_ref(ctx);
-
-            let active_window_id = ctx.windows().active_window();
-            let (id, _) = ctx.add_window(
-                AddWindowOptions {
-                    window_style: WindowStyle::Pin,
-                    window_bounds: WindowBounds::ExactPosition(config.window_bounds),
-                    title: Some("Warp".to_owned()),
-                    background_blur_radius_pixels: Some(*window_settings.background_blur_radius),
-                    background_blur_texture: *window_settings.background_blur_texture,
-                    // Ignore the quake window for positioning the next window
-                    anchor_new_windows_from_closed_position:
-                        warpui::NextNewWindowsHasThisWindowsBoundsUponClose::No,
-                    on_gpu_driver_selected: on_gpu_driver_selected_callback(),
-                    window_instance: Some(ChannelState::app_id().to_string() + "-hotkey"),
-                    ..Default::default()
-                },
-                |ctx| {
-                    let mut view = RootView::new(
-                        global_resource_handles.clone(),
-                        NewWorkspaceSource::Empty {
-                            previous_active_window: active_window_id,
-                            shell: None,
-                        },
-                        ctx,
-                    );
-                    view.focus(ctx);
-                    view
-                },
-            );
-
-            // Update quake mode state after the call to prevent deadlocking.
-            let mut quake_mode_state = QUAKE_STATE.lock();
-            *quake_mode_state = Some(QuakeModeState {
-                window_state: WindowState::PendingOpen,
-                window_id: id,
-                active_display_id: config.display_id,
-                last_show_at: Some(Instant::now()),
-            });
+            if let Some(workspace_id) = WorkspaceRegistry::as_ref(ctx).active_id(window_id) {
+                ProjectSwitcher::handle(ctx).update(ctx, |switcher, _| {
+                    switcher.stamp(workspace_id, synthetic_root_identity());
+                });
+            }
         }
         // Show arm: the panel is hidden, OR the cached state says Open/Pending
         // but the panel is not the currently active window. The second case is
@@ -1887,11 +1853,6 @@ fn toggle_quake_mode_window(global_resource_handles: &GlobalResourceHandles, ctx
             if matches!(state.window_state, WindowState::Hidden)
                 || active_window_id != Some(state.window_id) =>
         {
-            log::info!(
-                "[quake-diag] toggle arm=Show (state={:?} window_id={:?})",
-                state.window_state,
-                state.window_id,
-            );
             send_telemetry_from_app_ctx!(TelemetryEvent::OpenQuakeModeWindow, ctx);
 
             // If quake mode does not have a set pin screen -- move it to the current active screen.
@@ -1917,21 +1878,12 @@ fn toggle_quake_mode_window(global_resource_handles: &GlobalResourceHandles, ctx
             if let Some(state) = quake_mode_state.as_mut() {
                 state.window_state = WindowState::PendingOpen;
                 state.last_show_at = Some(Instant::now());
-                log::info!(
-                    "[quake-diag] toggle arm=Show post-show state -> PendingOpen window_id={:?}",
-                    state.window_id,
-                );
             }
         }
         // Hide arm: state says Open/Pending AND the panel is the currently
         // active window — i.e. the user is interacting with the panel and
         // wants to dismiss it.
         Some(state) => {
-            log::info!(
-                "[quake-diag] toggle arm=Hide (window_id={:?} state={:?})",
-                state.window_id,
-                state.window_state,
-            );
             ctx.windows().hide_window(state.window_id);
 
             // Update quake mode state after the call to prevent deadlocking.
@@ -1939,10 +1891,6 @@ fn toggle_quake_mode_window(global_resource_handles: &GlobalResourceHandles, ctx
 
             if let Some(state) = quake_mode_state.as_mut() {
                 state.window_state = WindowState::Hidden;
-                log::info!(
-                    "[quake-diag] toggle arm=Hide post-hide state -> Hidden window_id={:?}",
-                    state.window_id,
-                );
             }
         }
     };

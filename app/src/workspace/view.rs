@@ -13675,6 +13675,14 @@ impl Workspace {
 
     /// How to render the tab bar.
     fn tab_bar_mode(&self, app: &AppContext) -> ShowTabBar {
+        // The panel-style host window (quake hotkey window) keeps a minimal drop-down look:
+        // no tab bar, which also strips the search field, header-toolbar buttons, and
+        // right-side controls that render inside it. Project pills stay visible — they come
+        // from `render_project_bar`, which is gated independently of the tab bar.
+        if crate::root_view::quake_mode_window_id() == Some(self.window_id) {
+            return ShowTabBar::Hidden;
+        }
+
         // Drag-preview windows always show the tab bar inline; the user
         // is literally holding the tab they detached, so it must remain
         // visible regardless of the user's hover/fullscreen settings.
