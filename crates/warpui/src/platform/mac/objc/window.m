@@ -32,27 +32,14 @@ static const NSSize TEST_MIN_WINDOW_SIZE = {124.0, 34.0};
 NSMutableArray<NSNumber *> *windowOrderForTests;
 dispatch_once_t windowOrderOnce;
 
-// === quake-mode-spaces diagnostic instrumentation =========================
+// === quake-mode Spaces handling ============================================
 //
-// All logs prefixed with [quake-diag] so a single `log stream` predicate
-// can pick them up. Pure observation: nothing mutates panel/app state.
-// To be removed once the Spaces-related quake-mode bug is fixed.
-static void quake_diag_log_panel(const char *label, NSWindow *panel) {
-    NSWindow *key = [NSApp keyWindow];
-    NSLog(@"[quake-diag] %s panel=%p visible=%d onActiveSpace=%d "
-          @"collectionBehavior=0x%lx occlusionState=0x%lx appActive=%d "
-          @"keyWindow=%p keyTitle=%@",
-          label, panel,
-          (int)[panel isVisible],
-          (int)[panel isOnActiveSpace],
-          (unsigned long)[panel collectionBehavior],
-          (unsigned long)[panel occlusionState],
-          (int)[NSApp isActive],
-          key,
-          key ? [key title] : @"<none>");
-}
+// State and observers that make the quake panel behave correctly across Mac
+// Space transitions: hide synchronously when the user leaves its Space, and
+// suppress the spurious auto-hide caused by AppKit's post-transition "settle"
+// deactivation.
 
-static dispatch_once_t quakeDiagSpaceObserverOnce;
+static dispatch_once_t quakeSpaceObserverOnce;
 
 // Monotonic nanosecond timestamp of the most recent
 // NSWorkspaceActiveSpaceDidChange notification, or 0 if none has fired yet.
@@ -86,6 +73,29 @@ static int64_t quake_monotonic_ns(void) {
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
 }
 
+// Strips the macOS title-bar chrome (traffic lights, title text) from the
+// given quake panel so Warp's content draws flush to the top of the window.
+// Removes the Closable / Miniaturizable / Resizable style mask bits — that
+// makes AppKit not allocate the standard buttons at all, so the buttons
+// don't reappear when Warp's configure_titlebar_height runs and tries to
+// position them (it short-circuits when standardWindowButton: returns nil).
+static void quake_strip_panel_chrome(NSWindow *panel) {
+    if (!panel) {
+        return;
+    }
+    // Titled is removed too: AppKit's rounded window corners come from the titled frame
+    // view, so dropping the bit makes the panel square-cornered. Key/main status is
+    // unaffected — WarpPanel overrides canBecomeKeyWindow/canBecomeMainWindow to YES,
+    // which is what borderless windows otherwise lack.
+    NSWindowStyleMask removed = (NSWindowStyleMaskClosable |
+                                 NSWindowStyleMaskMiniaturizable |
+                                 NSWindowStyleMaskResizable |
+                                 NSWindowStyleMaskTitled);
+    panel.styleMask = (panel.styleMask | NSWindowStyleMaskFullSizeContentView) & ~removed;
+    panel.titlebarAppearsTransparent = YES;
+    panel.titleVisibility = NSWindowTitleHidden;
+}
+
 // Returns true if the current moment is inside the AppKit "settle window"
 // after a user-initiated show — i.e. an active-space change fired after the
 // show, within QUAKE_SETTLE_WINDOW_MS.
@@ -101,8 +111,8 @@ static BOOL quake_in_settle_window(void) {
     return (showMs < QUAKE_SETTLE_WINDOW_MS) && (spaceMs < showMs);
 }
 
-static void quake_diag_install_space_observer(void) {
-    dispatch_once(&quakeDiagSpaceObserverOnce, ^{
+static void quake_install_space_observers(void) {
+    dispatch_once(&quakeSpaceObserverOnce, ^{
       [[[NSWorkspace sharedWorkspace] notificationCenter]
           addObserverForName:NSWorkspaceActiveSpaceDidChangeNotification
                       object:nil
@@ -110,9 +120,6 @@ static void quake_diag_install_space_observer(void) {
                   usingBlock:^(NSNotification *note __unused) {
                     atomic_store_explicit(&quakeLastSpaceChangeNs, quake_monotonic_ns(),
                                           memory_order_relaxed);
-                    NSLog(@"[quake-diag] NSWorkspaceActiveSpaceDidChange "
-                          @"appActive=%d keyWindow=%p",
-                          (int)[NSApp isActive], [NSApp keyWindow]);
                   }];
 
       // WillResignActive fires synchronously at the *start* of a Mac Space
@@ -128,11 +135,8 @@ static void quake_diag_install_space_observer(void) {
                         return;
                     }
                     if (quake_in_settle_window()) {
-                        NSLog(@"[quake-diag] WillResignActive suppress orderOut: "
-                              @"in settle window");
                         return;
                     }
-                    NSLog(@"[quake-diag] WillResignActive orderOut quake panel");
                     [gQuakePanel orderOut:nil];
                   }];
 
@@ -157,14 +161,9 @@ static void quake_diag_install_space_observer(void) {
                     }
                     int64_t showMs = (quake_monotonic_ns() - lastShow) / 1000000;
                     if (showMs < QUAKE_SETTLE_WINDOW_MS) {
-                        NSLog(@"[quake-diag] DidBecomeActive re-key quake panel "
-                              @"(showMs=%lld)", showMs);
                         [gQuakePanel makeKeyAndOrderFront:nil];
                     }
                   }];
-
-      NSLog(@"[quake-diag] installed NSWorkspaceActiveSpaceDidChange + "
-            @"NSApplication active observers");
     });
 }
 
@@ -182,7 +181,7 @@ int64_t quake_ms_since_space_change(void) {
     int64_t deltaNs = quake_monotonic_ns() - lastNs;
     return deltaNs / 1000000;
 }
-// === end quake-mode-spaces diagnostic instrumentation =====================
+// === end quake-mode Spaces handling ========================================
 
 FullscreenWindowManager *fullscreenManager;
 dispatch_once_t fullscreenQueueOnce;
@@ -820,11 +819,12 @@ void init_warp_nswindow(NSWindow<WarpWindowProtocol> *window, bool testMode, boo
 }
 
 - (void)positionPinnedPanel {
-    quake_diag_install_space_observer();
+    quake_install_space_observers();
     gQuakePanel = self;
     atomic_store_explicit(&quakeLastShowNs, quake_monotonic_ns(), memory_order_relaxed);
-    quake_diag_log_panel("positionPinnedPanel:enter", self);
     previouslyActiveAppPID = [PreviousStateHelper storePreviousState];
+
+    quake_strip_panel_chrome(self);
 
     // NSFloatingWindowLevel allows us to float above all other normal application
     // windows but also not overlap with user's dock, menu bar, spotlight and Raycast.
@@ -845,11 +845,8 @@ void init_warp_nswindow(NSWindow<WarpWindowProtocol> *window, bool testMode, boo
          NSWindowCollectionBehaviorFullScreenAuxiliary);
 
     [self setMovable:NO];
-    quake_diag_log_panel("positionPinnedPanel:beforeActivate", self);
     [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
-    quake_diag_log_panel("positionPinnedPanel:beforeMakeKey", self);
     [self makeKeyAndOrderFront:nil];
-    quake_diag_log_panel("positionPinnedPanel:exit", self);
 }
 
 // Note this returns a retained object ("create" rule).
@@ -1148,7 +1145,6 @@ void activate_app() {
 }
 
 void show_window_and_focus_app(WarpWindow<WarpWindowProtocol> *window, bool bringToFront) {
-    quake_diag_log_panel("show_window_and_focus_app:enter", window);
     if ([window isKindOfClass:[WarpPanel class]]) {
         gQuakePanel = window;
         atomic_store_explicit(&quakeLastShowNs, quake_monotonic_ns(), memory_order_relaxed);
@@ -1160,22 +1156,17 @@ void show_window_and_focus_app(WarpWindow<WarpWindowProtocol> *window, bool brin
     // do this explicitly for hotkey windows, as they subclass NSPanel (which
     // requires explicit registration in the window list).
     [NSApp addWindowsItem:window title:[window title] filename:NO];
-    quake_diag_log_panel("show_window_and_focus_app:afterAddWindowsItem", window);
 
     if (bringToFront) {
         [window makeKeyAndOrderFront:nil];
-        quake_diag_log_panel("show_window_and_focus_app:afterMakeKeyAndOrderFront", window);
     } else {
         [window makeKeyWindow];
-        quake_diag_log_panel("show_window_and_focus_app:afterMakeKeyWindow", window);
     }
 
     // There are some edge cases with the hot key window in a multi-screen setup that toggling
     // the hotkey will activate the app and only bring forward a normal window. This code makes
     // sure that we are bringing forward the hotkey window
     if (![[NSApplication sharedApplication] isActive]) {
-        NSLog(@"[quake-diag] show_window_and_focus_app: app not active, installing "
-              @"NSApplicationDidBecomeActive observer for re-makeKeyAndOrderFront");
         // Creates a static observer so it can be referenced in the observer callback.
         __block id observer;
         observer = [[NSNotificationCenter defaultCenter]
@@ -1185,22 +1176,15 @@ void show_window_and_focus_app(WarpWindow<WarpWindowProtocol> *window, bool brin
                     usingBlock:^(NSNotification *note __unused) {
                       // Make key and order front again after the app has activated to make
                       // sure the toggled window is focused after initializing.
-                      quake_diag_log_panel(
-                          "show_window_and_focus_app:didBecomeActive:beforeMakeKey", window);
                       [window makeKeyAndOrderFront:nil];
-                      quake_diag_log_panel(
-                          "show_window_and_focus_app:didBecomeActive:afterMakeKey", window);
                       [[NSNotificationCenter defaultCenter] removeObserver:observer];
                     }];
 
         [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
-        quake_diag_log_panel("show_window_and_focus_app:afterActivate", window);
     }
-    quake_diag_log_panel("show_window_and_focus_app:exit", window);
 }
 
 void hide_window(WarpWindow<WarpWindowProtocol> *window) {
-    quake_diag_log_panel("hide_window:enter", window);
     NSRunningApplication *runningApp = [[NSWorkspace sharedWorkspace] frontmostApplication];
 
     // Don't activate to previous state if:
@@ -1211,8 +1195,6 @@ void hide_window(WarpWindow<WarpWindowProtocol> *window) {
     BOOL ownsKeyWindow =
         [runningApp.bundleIdentifier isEqualToString:[[NSBundle mainBundle] bundleIdentifier]];
     BOOL keyIsModal = [activeWindow isModalPanel];
-    NSLog(@"[quake-diag] hide_window: ownsKeyWindow=%d keyIsModal=%d prevAppPID=%@",
-          (int)ownsKeyWindow, (int)keyIsModal, previouslyActiveAppPID);
     if (ownsKeyWindow && !keyIsModal) {
         [PreviousStateHelper activatePreviousState:previouslyActiveAppPID];
     }
@@ -1220,7 +1202,6 @@ void hide_window(WarpWindow<WarpWindowProtocol> *window) {
 
     // Order out removes window from the screen but still maintains the NSWindow object.
     [window orderOut:nil];
-    quake_diag_log_panel("hide_window:exit", window);
 }
 
 // Sets the per-window opacity. Unlike `hide_window`, this does not change the
