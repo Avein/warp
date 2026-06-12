@@ -550,6 +550,17 @@ define_settings_group!(TabSettings, settings: [
         toml_path: "appearance.project_bar.visible",
         description: "Whether to show the project-tab bar inside the workspace.",
     },
+    // Height of the project-tab (pill) bar. The 34.0 default matches `TAB_BAR_HEIGHT`, which the
+    // bar was hard-coded to before this knob existed.
+    project_bar_height: ProjectBarHeight {
+        type: f32,
+        default: 34.0,
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+        private: false,
+        toml_path: "appearance.project_bar.height",
+        description: "Height in pixels of the project-tab bar.",
+    },
     header_toolbar_chip_selection: HeaderToolbarChipSelection,
     new_tab_placement: NewTabPlacement,
     workspace_decoration_visibility: WorkspaceDecorationVisibility,

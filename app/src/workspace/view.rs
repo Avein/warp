@@ -3983,9 +3983,11 @@ impl Workspace {
                 self.sync_panel_positions_from_config(ctx);
                 ctx.notify();
             }
-            // `Workspace::render` reads `project_bar_visible` on each render to gate the project
-            // bar; this notify just kicks a re-render when the setting changes.
-            TabSettingsChangedEvent::ProjectBarVisible { .. } => {
+            // `Workspace::render` reads `project_bar_visible` / `project_bar_height` on each
+            // render to gate and size the project bar; this notify just kicks a re-render when
+            // either setting changes.
+            TabSettingsChangedEvent::ProjectBarVisible { .. }
+            | TabSettingsChangedEvent::ProjectBarHeight { .. } => {
                 ctx.notify();
             }
         }
@@ -20413,8 +20415,10 @@ impl Workspace {
             row.add_child(Expanded::new(1.0, component.render()).finish());
         }
 
+        // Clamped so a typo'd zero/negative TOML value can't collapse the row into the layout.
+        let height = (*TabSettings::as_ref(app).project_bar_height).max(1.0);
         let row = ConstrainedBox::new(row.finish())
-            .with_height(TAB_BAR_HEIGHT)
+            .with_height(height)
             .finish();
         let theme = appearance.theme();
         Container::new(row)
